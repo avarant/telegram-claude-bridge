@@ -1,7 +1,11 @@
 import "dotenv/config";
-import { Bot, InlineKeyboard } from "grammy";
+import { Bot, InlineKeyboard, type Context } from "grammy";
+import { autoRetry } from "@grammyjs/auto-retry";
+import { stream, streamApi, type StreamFlavor } from "@grammyjs/stream";
 import { ClaudeProcess } from "./claude-process.js";
 import { PermissionHandler, PermissionRequest } from "./permission-handler.js";
+
+type MyContext = StreamFlavor<Context>;
 
 // --- Config ---
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN!;
@@ -21,6 +25,8 @@ const permissionChatMap = new Map<string, number>();
 let activeChatId: number | null = null;
 // Per-chat message queue to prevent concurrent sends
 const chatLocks = new Map<string, Promise<void>>();
+// Draft ID counter to avoid clashes between concurrent streams
+let draftIdCounter = 0;
 
 function withChatLock(chatId: string, fn: () => Promise<void>): Promise<void> {
   const prev = chatLocks.get(chatId) ?? Promise.resolve();
@@ -30,7 +36,9 @@ function withChatLock(chatId: string, fn: () => Promise<void>): Promise<void> {
 }
 
 // --- Bot ---
-const bot = new Bot(BOT_TOKEN);
+const bot = new Bot<MyContext>(BOT_TOKEN);
+bot.api.config.use(autoRetry());
+bot.use(stream());
 
 function isAllowed(chatId: number): boolean {
   if (ALLOWED_CHAT_IDS.size === 0) return false;
@@ -52,91 +60,97 @@ function getOrSpawnClaude(chatId: string): ClaudeProcess {
   return cp;
 }
 
-const MAX_MSG_LENGTH = 4096;
-
-async function sendLongMessage(chatId: number, text: string): Promise<void> {
-  if (text.length <= MAX_MSG_LENGTH) {
-    await bot.api.sendMessage(chatId, text);
-    return;
-  }
-  const lines = text.split("\n");
-  let chunk = "";
-  for (const line of lines) {
-    if (chunk.length + line.length + 1 > MAX_MSG_LENGTH) {
-      if (chunk) await bot.api.sendMessage(chatId, chunk);
-      chunk = line;
-    } else {
-      chunk += (chunk ? "\n" : "") + line;
-    }
-  }
-  if (chunk) await bot.api.sendMessage(chatId, chunk);
-}
-
 /**
- * Wait for a result event from Claude, collecting response text.
+ * Create an async iterator that yields text chunks from Claude events,
+ * resolving when the result event is received.
  */
-function waitForResult(
-  claude: ClaudeProcess,
-  sendTyping: () => void
-): Promise<string> {
-  return new Promise<string>((resolve) => {
-    let responseText = "";
-    let finished = false;
+function streamClaude(
+  claude: ClaudeProcess
+): AsyncIterable<string> {
+  return {
+    [Symbol.asyncIterator]() {
+      let finished = false;
+      let resolveNext: ((value: IteratorResult<string>) => void) | null = null;
+      const pending: string[] = [];
 
-    const onEvent = (event: Record<string, unknown>) => {
-      switch (event.type) {
-        case "assistant": {
+      const onEvent = (event: Record<string, unknown>) => {
+        if (event.type === "assistant") {
           const msg = event.message as {
             content?: Array<{ type: string; text?: string }>;
           } | undefined;
           if (msg?.content) {
             for (const block of msg.content) {
               if (block.type === "text" && block.text) {
-                responseText += block.text;
+                if (resolveNext) {
+                  const r = resolveNext;
+                  resolveNext = null;
+                  r({ value: block.text, done: false });
+                } else {
+                  pending.push(block.text);
+                }
               }
             }
           }
-          break;
-        }
-
-        case "result": {
-          const result = event as Record<string, unknown>;
-          if (result.result && typeof result.result === "string") {
-            if (!responseText) responseText = result.result;
-          }
-          if (result.is_error === true && !responseText) {
-            responseText =
-              (result.error as string) ||
-              (result.result as string) ||
-              "An error occurred.";
-          }
+        } else if (event.type === "result") {
           finished = true;
-          break;
+          const result = event as Record<string, unknown>;
+          // If no text was streamed, yield the result text
+          if (result.is_error === true) {
+            const errText = (result.error as string) || (result.result as string) || "An error occurred.";
+            if (resolveNext) {
+              const r = resolveNext;
+              resolveNext = null;
+              r({ value: errText, done: false });
+            } else {
+              pending.push(errText);
+            }
+          }
+          // Signal completion on next pull
+          if (resolveNext) {
+            const r = resolveNext;
+            resolveNext = null;
+            r({ value: undefined as unknown as string, done: true });
+          }
         }
-      }
-    };
+      };
 
-    claude.on("event", onEvent);
-
-    const check = () => {
-      if (finished) {
-        claude.removeListener("event", onEvent);
-        resolve(responseText);
-        return;
-      }
-      sendTyping();
-      setTimeout(check, 3000);
-    };
-    check();
-
-    claude.once("exit", () => {
-      if (!finished) {
+      const onExit = () => {
         finished = true;
-        claude.removeListener("event", onEvent);
-        resolve(responseText || "Claude process exited unexpectedly.");
-      }
-    });
-  });
+        if (resolveNext) {
+          const r = resolveNext;
+          resolveNext = null;
+          if (pending.length === 0) {
+            r({ value: undefined as unknown as string, done: true });
+          }
+        }
+      };
+
+      claude.on("event", onEvent);
+      claude.once("exit", onExit);
+
+      return {
+        next(): Promise<IteratorResult<string>> {
+          // Drain pending chunks first
+          if (pending.length > 0) {
+            return Promise.resolve({ value: pending.shift()!, done: false });
+          }
+          if (finished) {
+            claude.removeListener("event", onEvent);
+            claude.removeListener("exit", onExit);
+            return Promise.resolve({ value: undefined as unknown as string, done: true });
+          }
+          return new Promise((resolve) => {
+            resolveNext = resolve;
+          });
+        },
+        return(): Promise<IteratorResult<string>> {
+          claude.removeListener("event", onEvent);
+          claude.removeListener("exit", onExit);
+          return Promise.resolve({ value: undefined as unknown as string, done: true });
+        },
+      };
+    },
+  };
 }
 
 // --- Permission Handler ---
@@ -208,31 +222,24 @@ bot.on("message:text", async (ctx) => {
 
   // Run Claude interaction in background so Grammy can process callback queries
   // (permission button clicks) while we wait for Claude's response
-  const numChatIdCopy = numChatId;
-  const chatIdCopy = chatId;
-  const textCopy = text;
-
-  withChatLock(chatIdCopy, async () => {
-    activeChatId = numChatIdCopy;
+  withChatLock(chatId, async () => {
+    activeChatId = numChatId;
 
     try {
-      await bot.api.sendChatAction(numChatIdCopy, "typing");
+      const claude = getOrSpawnClaude(chatId);
+      claude.sendMessage(text);
 
-      const claude = getOrSpawnClaude(chatIdCopy);
-      claude.sendMessage(textCopy);
+      const draftOffset = (++draftIdCounter) << 8;
+      const textStream = streamClaude(claude);
+      const api = streamApi(bot.api.raw);
+      const messages = await api.streamMessage(numChatId, draftOffset, textStream);
 
-      const responseText = await waitForResult(claude, () => {
-        bot.api.sendChatAction(numChatIdCopy, "typing").catch(() => {});
-      });
-
-      if (responseText.trim()) {
-        await sendLongMessage(numChatIdCopy, responseText.trim());
-      } else {
-        await bot.api.sendMessage(numChatIdCopy, "(No response from Claude)");
+      if (messages.length === 0) {
+        await bot.api.sendMessage(numChatId, "(No response from Claude)");
       }
     } catch (err) {
       console.error("[bot] Error in Claude interaction:", err);
-      await bot.api.sendMessage(numChatIdCopy, "Error processing message.").catch(() => {});
+      await bot.api.sendMessage(numChatId, "Error processing message.").catch(() => {});
     } finally {
       activeChatId = null;
     }
