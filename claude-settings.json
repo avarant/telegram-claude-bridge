@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/varant/telegram-claude-bridge/src/permission-hook.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
