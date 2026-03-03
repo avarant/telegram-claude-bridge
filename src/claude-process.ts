@@ -42,6 +42,7 @@ export class ClaudeProcess extends EventEmitter {
         settingsPath,
       ],
       {
+        cwd: process.env.HOME || "/home/varant",
         stdio: ["pipe", "pipe", "pipe"],
         env: Object.fromEntries(
           Object.entries(process.env).filter(
