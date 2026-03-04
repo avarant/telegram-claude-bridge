@@ -1,4 +1,6 @@
 import http from "http";
+import fs from "fs";
+import path from "path";
 import { v4 as uuidv4 } from "uuid";
 
 export interface PermissionRequest {
@@ -7,6 +9,8 @@ export interface PermissionRequest {
   toolInput: unknown;
   rawBody: string;
 }
+
+export type PermissionDecision = "allow" | "allowSession" | "alwaysAllow" | "deny";
 
 interface PendingPermission {
   request: PermissionRequest;
@@ -24,10 +28,16 @@ export class PermissionHandler {
   private sendPrompt: SendPermissionPrompt;
   private port: number;
   private timeoutMs = 120_000;
+  private sessionRules = new Set<string>();
+  private settingsPath: string;
 
   constructor(port: number, sendPrompt: SendPermissionPrompt) {
     this.port = port;
     this.sendPrompt = sendPrompt;
+    this.settingsPath = path.resolve(
+      path.dirname(new URL(import.meta.url).pathname),
+      "../claude-settings.json"
+    );
 
     this.server = http.createServer((req, res) => {
       if (req.method === "POST" && req.url === "/permission") {
@@ -37,6 +47,32 @@ export class PermissionHandler {
         res.end("Not found");
       }
     });
+  }
+
+  private isAutoAllowed(toolName: string): boolean {
+    return this.sessionRules.has(toolName);
+  }
+
+  private addAlwaysAllow(toolName: string): void {
+    try {
+      const raw = fs.readFileSync(this.settingsPath, "utf-8");
+      const settings = JSON.parse(raw);
+      if (!settings.permissions) settings.permissions = {};
+      if (!Array.isArray(settings.permissions.allow)) settings.permissions.allow = [];
+      const rule = toolName;
+      if (!settings.permissions.allow.includes(rule)) {
+        settings.permissions.allow.push(rule);
+        fs.writeFileSync(this.settingsPath, JSON.stringify(settings, null, 2) + "\n");
+        console.log("[permission] added always-allow rule for:", toolName);
+      }
+    } catch (err) {
+      console.error("[permission] failed to update settings:", err);
+    }
+  }
+
+  clearSessionRules(): void {
+    this.sessionRules.clear();
+    console.log("[permission] session rules cleared");
   }
 
   private handlePermissionRequest(
@@ -62,6 +98,20 @@ export class PermissionHandler {
           parsed.tool?.input ||
           parsed.input ||
           {};
+
+        // Check session auto-allow rules
+        if (this.isAutoAllowed(toolName)) {
+          console.log("[permission] auto-allowed by session rule:", toolName);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            hookSpecificOutput: {
+              hookEventName: "PreToolUse",
+              permissionDecision: "allow",
+              permissionDecisionReason: "Auto-allowed by session rule",
+            },
+          }));
+          return;
+        }
 
         const request: PermissionRequest = {
           id,
@@ -121,12 +171,26 @@ export class PermissionHandler {
     });
   }
 
-  resolvePermission(id: string, allow: boolean): boolean {
+  resolvePermission(id: string, decision: PermissionDecision): boolean {
     const pending = this.pending.get(id);
     if (!pending) return false;
     clearTimeout(pending.timer);
     this.pending.delete(id);
-    pending.resolve({ allow });
+
+    const toolName = pending.request.toolName;
+
+    if (decision === "allowSession") {
+      this.sessionRules.add(toolName);
+      console.log("[permission] added session rule for:", toolName);
+      pending.resolve({ allow: true });
+    } else if (decision === "alwaysAllow") {
+      this.sessionRules.add(toolName);
+      this.addAlwaysAllow(toolName);
+      pending.resolve({ allow: true });
+    } else {
+      pending.resolve({ allow: decision === "allow" });
+    }
+
     return true;
   }
 

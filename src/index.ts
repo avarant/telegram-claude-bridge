@@ -3,7 +3,7 @@ import { Bot, InlineKeyboard, type Context } from "grammy";
 import { autoRetry } from "@grammyjs/auto-retry";
 import { stream, streamApi, type StreamFlavor } from "@grammyjs/stream";
 import { ClaudeProcess } from "./claude-process.js";
-import { PermissionHandler, PermissionRequest } from "./permission-handler.js";
+import { PermissionHandler, PermissionRequest, PermissionDecision } from "./permission-handler.js";
 
 type MyContext = StreamFlavor<Context>;
 
@@ -177,6 +177,8 @@ const permissionHandler = new PermissionHandler(
 
     const keyboard = new InlineKeyboard()
       .text("Allow", `perm:allow:${request.id}`)
+      .text("Session", `perm:allowSession:${request.id}`)
+      .text("Always", `perm:alwaysAllow:${request.id}`)
       .text("Deny", `perm:deny:${request.id}`);
 
     await bot.api.sendMessage(chatId, text, { reply_markup: keyboard });
@@ -203,6 +205,7 @@ bot.command("new", async (ctx) => {
     existing.kill();
     claudeProcesses.delete(chatId);
   }
+  permissionHandler.clearSessionRules();
   await ctx.reply("Session cleared. Send a message to start a new one.");
 });
 
@@ -253,23 +256,27 @@ bot.on("callback_query:data", async (ctx) => {
   if (!data.startsWith("perm:")) return;
 
   const parts = data.split(":");
-  const decision = parts[1];
+  const decision = parts[1] as PermissionDecision;
   const requestId = parts.slice(2).join(":");
   console.log("[bot] permission decision:", decision, "requestId:", requestId);
 
-  const allow = decision === "allow";
-  const resolved = permissionHandler.resolvePermission(requestId, allow);
+  const resolved = permissionHandler.resolvePermission(requestId, decision);
   console.log("[bot] resolvePermission result:", resolved);
+
+  const labels: Record<PermissionDecision, string> = {
+    allow: "Allowed",
+    allowSession: "Allowed (session)",
+    alwaysAllow: "Always allowed",
+    deny: "Denied",
+  };
+  const label = labels[decision] || decision;
 
   try {
     if (resolved) {
-      await ctx.answerCallbackQuery({
-        text: allow ? "Allowed" : "Denied",
-      });
+      await ctx.answerCallbackQuery({ text: label });
       try {
         await ctx.editMessageText(
-          ctx.callbackQuery.message?.text +
-            `\n\n${allow ? "Allowed" : "Denied"}`
+          ctx.callbackQuery.message?.text + `\n\n${label}`
         );
       } catch {
         // Message might be too old to edit
