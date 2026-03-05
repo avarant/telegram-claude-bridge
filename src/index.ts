@@ -4,6 +4,7 @@ import { autoRetry } from "@grammyjs/auto-retry";
 import { stream, streamApi, type StreamFlavor } from "@grammyjs/stream";
 import { ClaudeProcess } from "./claude-process.js";
 import { PermissionHandler, PermissionRequest, PermissionDecision } from "./permission-handler.js";
+import { markdownToTelegramHtml } from "./markdown.js";
 
 type MyContext = StreamFlavor<Context>;
 
@@ -236,6 +237,19 @@ bot.on("message:text", async (ctx) => {
       const textStream = streamClaude(claude);
       const api = streamApi(bot.api.raw);
       const messages = await api.streamMessage(numChatId, draftOffset, textStream);
+
+      // Edit final messages with markdown rendering
+      for (const msg of messages) {
+        try {
+          const html = markdownToTelegramHtml(msg.text);
+          await bot.api.editMessageText(numChatId, msg.message_id, html, {
+            parse_mode: "HTML",
+          });
+        } catch (err) {
+          // If HTML parsing fails, leave the plain text message as-is
+          console.error("[bot] markdown render failed, keeping plain text:", (err as Error).message);
+        }
+      }
 
       if (messages.length === 0) {
         await bot.api.sendMessage(numChatId, "(No response from Claude)");

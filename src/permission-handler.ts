@@ -49,7 +49,12 @@ export class PermissionHandler {
     });
   }
 
+  // Tools that should always prompt the user regardless of rules
+  // (e.g. ExitPlanMode requires reviewing the plan each time)
+  private static ALWAYS_PROMPT = new Set(["ExitPlanMode"]);
+
   private isAutoAllowed(toolName: string): boolean {
+    if (PermissionHandler.ALWAYS_PROMPT.has(toolName)) return false;
     return this.sessionRules.has(toolName);
   }
 

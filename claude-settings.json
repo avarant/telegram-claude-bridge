@@ -10,5 +10,18 @@
         ]
       }
     ]
+  },
+  "permissions": {
+    "allow": [
+      "EnterPlanMode",
+      "Agent",
+      "Read",
+      "Glob",
+      "Write",
+      "ExitPlanMode",
+      "Bash",
+      "Grep",
+      "Edit"
+    ]
   }
 }
