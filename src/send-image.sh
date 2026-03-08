@@ -13,10 +13,12 @@ if [ ! -f "$IMAGE_PATH" ]; then
   exit 1
 fi
 
+JSON=$(jq -n --arg path "$IMAGE_PATH" --arg caption "$CAPTION" '{path: $path, caption: $caption}')
+
 RESPONSE=$(curl -s --max-time 30 \
   -X POST \
   -H "Content-Type: application/json" \
-  -d "{\"path\": \"$IMAGE_PATH\", \"caption\": \"$CAPTION\"}" \
+  -d "$JSON" \
   "$SEND_IMAGE_URL" 2>/dev/null) || {
   echo "Error: Failed to connect to bridge IPC server" >&2
   exit 1
