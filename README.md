@@ -94,6 +94,23 @@ Telegram <-> Grammy Bot (index.ts)
 | `ALLOWED_CHAT_IDS` | Comma-separated list of authorized chat IDs | *(required)* |
 | `PERMISSION_PORT` | Port for the local permission IPC server | `19275` |
 
+## Claude Code setup
+
+Add the following to your `~/CLAUDE.md` so Claude knows it's running via Telegram and can send images:
+
+```markdown
+# Telegram Bridge
+
+- If the `TELEGRAM_BRIDGE` env var is set, you are communicating via Telegram
+- **Sending images to Telegram**: Run the send-image script:
+  ```
+  bash /path/to/telegram-claude-bridge/src/send-image.sh /absolute/path/to/image.png "optional caption"
+  ```
+  The script sends the image to the active Telegram chat via the bridge's IPC server. The file must exist on disk.
+```
+
+The `TELEGRAM_BRIDGE` env var is set automatically by the bridge in the Claude subprocess. Update the script path in your `CLAUDE.md` to match where you cloned the repo.
+
 ## Running as a systemd service (Linux)
 
 To run the bridge persistently in the background on Linux (auto-starts on login, restarts on crash):
