@@ -39,11 +39,23 @@ Telegram ←→ Grammy Bot (index.ts)
 - **Concurrency**: Message handler runs Claude interaction in background (not awaited) so Grammy can process permission button callbacks concurrently. Per-chat lock serializes messages.
 - **Env filtering**: All `CLAUDE*` env vars (except `CLAUDE_API_KEY`) are stripped from subprocess to avoid "nested session" error
 
+## Images
+
+- **Telegram → Claude**: Photos sent by the user are downloaded to `/tmp/telegram_photo_<id>.jpg` and passed to Claude as a file path message
+- **Claude → Telegram**: Claude outputs `![caption](/path/to/image.png)` in its text. The bridge detects this via `IMAGE_RE` regex, sends the file as a Telegram photo via `sendPhoto`, and strips the markdown from the text. Supported formats: png, jpg, jpeg, gif, webp, bmp.
+- Detection logic is in `src/index.ts` — `extractImages()` function and `IMAGE_RE` regex
+
+## Environment
+
+- **`TELEGRAM_BRIDGE`**: Set to `"true"` in the Claude subprocess env so Claude can detect it's running via Telegram (used for Clanky identity in `~/CLAUDE.md`)
+- All other `CLAUDE*` env vars (except `CLAUDE_API_KEY`) are stripped from the subprocess to avoid "nested session" errors
+
 ## Bot Commands
 
 - `/start` — Show chat ID
 - `/new` — Kill current Claude process and start fresh
 - `/id` — Show chat ID
+- Commands are registered via `bot.api.setMyCommands()` on startup to keep the Telegram menu in sync
 
 ## Config (.env)
 

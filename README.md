@@ -14,8 +14,10 @@ Responses are streamed live using Telegram's `sendMessageDraft` API and rendered
   - **Always** — Permanently allow (writes to `claude-settings.json`)
   - **Deny** — Block the tool call
 - **Plan mode support** — `ExitPlanMode` always prompts for review regardless of auto-allow rules
+- **Image support** — Send photos to Claude (downloaded and passed as file paths) and receive images back (Claude's markdown images sent as Telegram photos)
 - **Per-chat sessions** — Each chat gets its own persistent Claude subprocess
 - **Concurrency safe** — Permission button callbacks are processed while Claude is running
+- **Identity-aware** — Sets `TELEGRAM_BRIDGE` env var so Claude can detect it's running via Telegram
 
 ## Prerequisites
 
