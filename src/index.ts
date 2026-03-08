@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { writeFile } from "node:fs/promises";
 import { Bot, InlineKeyboard, InputFile, type Context } from "grammy";
 import { autoRetry } from "@grammyjs/auto-retry";
 import { stream, streamApi, type StreamFlavor } from "@grammyjs/stream";
@@ -264,6 +265,60 @@ async function handleClaudeInteraction(
     }
   });
 }
+
+// --- Helper: download Telegram file to disk ---
+async function downloadAudioFile(fileId: string): Promise<string> {
+  const file = await bot.api.getFile(fileId);
+  const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
+  const res = await fetch(url);
+  const buffer = Buffer.from(await res.arrayBuffer());
+  const ext = file.file_path?.split(".").pop()?.toLowerCase() || "ogg";
+  const path = `/tmp/telegram_voice_${Date.now()}.${ext}`;
+  await writeFile(path, buffer);
+  return path;
+}
+
+// --- Handle voice messages ---
+bot.on("message:voice", async (ctx) => {
+  if (!isAllowed(ctx.chat.id)) {
+    await ctx.reply("Unauthorized.");
+    return;
+  }
+
+  const chatId = String(ctx.chat.id);
+  try {
+    const audioPath = await downloadAudioFile(ctx.message.voice.file_id);
+    const caption = ctx.message.caption || "";
+    const text = caption
+      ? `[Voice message received at ${audioPath}] ${caption}`
+      : `[Voice message received at ${audioPath}]`;
+    await handleClaudeInteraction(chatId, ctx.chat.id, text);
+  } catch (err) {
+    console.error("[bot] Error processing voice message:", err);
+    await ctx.reply("Failed to process voice message.");
+  }
+});
+
+// --- Handle audio files ---
+bot.on("message:audio", async (ctx) => {
+  if (!isAllowed(ctx.chat.id)) {
+    await ctx.reply("Unauthorized.");
+    return;
+  }
+
+  const chatId = String(ctx.chat.id);
+  try {
+    const audioPath = await downloadAudioFile(ctx.message.audio.file_id);
+    const caption = ctx.message.caption || "";
+    const text = caption
+      ? `[Audio file received at ${audioPath}] ${caption}`
+      : `[Audio file received at ${audioPath}]`;
+    await handleClaudeInteraction(chatId, ctx.chat.id, text);
+  } catch (err) {
+    console.error("[bot] Error processing audio file:", err);
+    await ctx.reply("Failed to process audio file.");
+  }
+});
 
 // --- Handle photos ---
 bot.on("message:photo", async (ctx) => {

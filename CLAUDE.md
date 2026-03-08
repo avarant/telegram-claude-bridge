@@ -45,6 +45,13 @@ Telegram ←→ Grammy Bot (index.ts)
 - **Claude → Telegram**: Claude runs `src/send-image.sh /path/to/image.png "caption"` which POSTs to the bridge's IPC server (`/send-image` endpoint). The bridge sends the file as a Telegram photo via `sendPhoto`.
 - Image sending logic: `src/send-image.sh` (script) → `permission-handler.ts` (`/send-image` endpoint) → `index.ts` (`setSendImageHandler`)
 
+## Voice Messages / Audio
+
+- **Telegram → Claude**: Voice messages and audio files are downloaded to `/tmp/telegram_voice_<timestamp>.<ext>` and passed to Claude as a text message with the file path (e.g. `[Voice message received at /tmp/telegram_voice_123.ogg]`)
+- Claude uses the `transcribe` skill (`~/.claude/skills/transcribe/`) to run Whisper locally on the file
+- Transcription uses pywhispercpp with the base model (~147MB VRAM, no conflict with hyprwhspr)
+- Supported formats: ogg, mp3, wav, m4a, flac, opus (converted to 16kHz WAV via ffmpeg)
+
 ## Environment
 
 - **`TELEGRAM_BRIDGE`**: Set to `"true"` in the Claude subprocess env so Claude can detect it's running via Telegram (used for Clanky identity in `~/CLAUDE.md`)
