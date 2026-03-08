@@ -1,7 +1,8 @@
 import "dotenv/config";
-import { Bot, InlineKeyboard, type Context } from "grammy";
+import { Bot, InlineKeyboard, InputFile, type Context } from "grammy";
 import { autoRetry } from "@grammyjs/auto-retry";
 import { stream, streamApi, type StreamFlavor } from "@grammyjs/stream";
+import { existsSync } from "fs";
 import { ClaudeProcess } from "./claude-process.js";
 import { PermissionHandler, PermissionRequest, PermissionDecision } from "./permission-handler.js";
 import { markdownToTelegramHtml } from "./markdown.js";
@@ -40,6 +41,21 @@ function withChatLock(chatId: string, fn: () => Promise<void>): Promise<void> {
 const bot = new Bot<MyContext>(BOT_TOKEN);
 bot.api.config.use(autoRetry());
 bot.use(stream());
+
+// --- Image detection ---
+const IMAGE_RE = /!\[([^\]]*)\]\((\/[^)]+\.(?:png|jpg|jpeg|gif|webp|bmp))\)/gi;
+
+function extractImages(text: string): { cleaned: string; images: Array<{ path: string; caption: string }> } {
+  const images: Array<{ path: string; caption: string }> = [];
+  const cleaned = text.replace(IMAGE_RE, (_match, caption, filePath) => {
+    if (existsSync(filePath)) {
+      images.push({ path: filePath, caption: caption || "" });
+      return ""; // Remove from text
+    }
+    return _match; // Keep if file doesn't exist
+  });
+  return { cleaned: cleaned.trim(), images };
+}
 
 function isAllowed(chatId: number): boolean {
   if (ALLOWED_CHAT_IDS.size === 0) return false;
@@ -242,12 +258,38 @@ async function handleClaudeInteraction(
       const api = streamApi(bot.api.raw);
       const messages = await api.streamMessage(numChatId, draftOffset, textStream);
 
+      // Edit final messages with markdown rendering, extracting images
       for (const msg of messages) {
         try {
-          const html = markdownToTelegramHtml(msg.text);
-          await bot.api.editMessageText(numChatId, msg.message_id, html, {
-            parse_mode: "HTML",
-          });
+          const { cleaned, images } = extractImages(msg.text);
+
+          // Send extracted images as photos
+          for (const img of images) {
+            try {
+              await bot.api.sendPhoto(numChatId, new InputFile(img.path), {
+                caption: img.caption || undefined,
+              });
+            } catch (imgErr) {
+              console.error("[bot] failed to send image:", img.path, (imgErr as Error).message);
+            }
+          }
+
+          // Edit the text message (remove image markdown, render remaining)
+          const textToRender = cleaned || (images.length > 0 ? "" : msg.text);
+          if (textToRender) {
+            const html = markdownToTelegramHtml(textToRender);
+            await bot.api.editMessageText(numChatId, msg.message_id, html, {
+              parse_mode: "HTML",
+            });
+          } else if (images.length > 0) {
+            // Message was only images — delete the now-empty text message
+            try {
+              await bot.api.deleteMessage(numChatId, msg.message_id);
+            } catch {
+              // If delete fails, just clear it
+              await bot.api.editMessageText(numChatId, msg.message_id, "⬆️").catch(() => {});
+            }
+          }
         } catch (err) {
           console.error("[bot] markdown render failed, keeping plain text:", (err as Error).message);
         }
