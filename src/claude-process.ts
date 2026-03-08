@@ -1,6 +1,7 @@
 import { spawn, ChildProcess } from "child_process";
 import { EventEmitter } from "events";
 import { randomUUID } from "crypto";
+import { readFileSync } from "fs";
 import path from "path";
 
 export interface ClaudeEvent {
@@ -22,10 +23,20 @@ export class ClaudeProcess extends EventEmitter {
   spawn(): void {
     if (this.proc) this.kill();
 
-    const settingsPath = path.resolve(
+    const repoRoot = path.resolve(
       path.dirname(new URL(import.meta.url).pathname),
-      "../claude-settings.json"
+      ".."
     );
+
+    // Read settings template and resolve the hook path dynamically
+    const settings = JSON.parse(
+      readFileSync(path.join(repoRoot, "claude-settings.json"), "utf-8")
+    );
+    for (const hook of settings.hooks?.PreToolUse?.[0]?.hooks ?? []) {
+      if (hook.type === "command" && hook.command?.includes("permission-hook.sh")) {
+        hook.command = path.join(repoRoot, "src/permission-hook.sh");
+      }
+    }
 
     // With --input-format stream-json, claude -p reads messages from stdin.
     // No prompt argument needed.
@@ -39,10 +50,10 @@ export class ClaudeProcess extends EventEmitter {
         "stream-json",
         "--verbose",
         "--settings",
-        settingsPath,
+        JSON.stringify(settings),
       ],
       {
-        cwd: process.env.HOME || "/home/varant",
+        cwd: process.env.HOME,
         stdio: ["pipe", "pipe", "pipe"],
         env: {
           ...Object.fromEntries(

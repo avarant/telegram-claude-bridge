@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/varant/telegram-claude-bridge/src/permission-hook.sh"
+            "command": "src/permission-hook.sh"
           }
         ]
       }
