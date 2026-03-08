@@ -94,6 +94,42 @@ Telegram <-> Grammy Bot (index.ts)
 | `ALLOWED_CHAT_IDS` | Comma-separated list of authorized chat IDs | *(required)* |
 | `PERMISSION_PORT` | Port for the local permission IPC server | `19275` |
 
+## Running as a systemd service (Linux)
+
+To run the bridge persistently in the background on Linux (auto-starts on login, restarts on crash):
+
+```bash
+# Create the service file
+cat > ~/.config/systemd/user/telegram-claude-bridge.service << 'EOF'
+[Unit]
+Description=Telegram Claude Bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/mher/Tools/telegram-claude-bridge
+ExecStart=/usr/bin/node --import tsx src/index.ts
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=/home/mher/Tools/telegram-claude-bridge/.env
+Environment=PATH=/home/mher/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
+EOF
+
+# Enable and start
+systemctl --user daemon-reload
+systemctl --user enable --now telegram-claude-bridge
+
+# Check status / logs
+systemctl --user status telegram-claude-bridge
+journalctl --user -u telegram-claude-bridge -f
+```
+
+> **Note:** Update `WorkingDirectory` and `EnvironmentFile` paths if your clone is in a different location.
+
 ## License
 
 ISC

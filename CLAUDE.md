@@ -62,3 +62,11 @@ Telegram ←→ Grammy Bot (index.ts)
 - `TELEGRAM_BOT_TOKEN` — Bot token from @BotFather
 - `ALLOWED_CHAT_IDS` — Comma-separated list of authorized chat IDs
 - `PERMISSION_PORT` — IPC server port (default: 19275)
+
+## systemd Service
+
+The bridge can run as a systemd user service for auto-start on login and auto-restart on crash. See the "Running as a systemd service" section in README.md for setup. Key commands:
+
+- `systemctl --user status telegram-claude-bridge` — check status
+- `systemctl --user restart telegram-claude-bridge` — restart after code changes
+- `journalctl --user -u telegram-claude-bridge -f` — tail logs
