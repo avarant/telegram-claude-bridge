@@ -42,8 +42,8 @@ Telegram ←→ Grammy Bot (index.ts)
 ## Images
 
 - **Telegram → Claude**: Photos sent by the user are downloaded to `/tmp/telegram_photo_<id>.jpg` and passed to Claude as a file path message
-- **Claude → Telegram**: Claude outputs `![caption](/path/to/image.png)` in its text. The bridge detects this via `IMAGE_RE` regex, sends the file as a Telegram photo via `sendPhoto`, and strips the markdown from the text. Supported formats: png, jpg, jpeg, gif, webp, bmp.
-- Detection logic is in `src/index.ts` — `extractImages()` function and `IMAGE_RE` regex
+- **Claude → Telegram**: Claude runs `src/send-image.sh /path/to/image.png "caption"` which POSTs to the bridge's IPC server (`/send-image` endpoint). The bridge sends the file as a Telegram photo via `sendPhoto`.
+- Image sending logic: `src/send-image.sh` (script) → `permission-handler.ts` (`/send-image` endpoint) → `index.ts` (`setSendImageHandler`)
 
 ## Environment
 
