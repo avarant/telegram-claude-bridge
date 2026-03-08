@@ -104,20 +104,38 @@ export class ClaudeProcess extends EventEmitter {
     }
   }
 
-  sendMessage(text: string): void {
+  sendMessage(text: string, images?: Array<{ base64: string; mediaType: string }>): void {
     if (!this.proc || !this.proc.stdin || this.proc.killed) {
       throw new Error("Claude process is not running");
     }
 
     const sid = this.sessionId || randomUUID();
+
+    let content: string | Array<Record<string, unknown>>;
+    if (images && images.length > 0) {
+      const blocks: Array<Record<string, unknown>> = [];
+      for (const img of images) {
+        blocks.push({
+          type: "image",
+          source: { type: "base64", media_type: img.mediaType, data: img.base64 },
+        });
+      }
+      if (text) {
+        blocks.push({ type: "text", text });
+      }
+      content = blocks;
+    } else {
+      content = text;
+    }
+
     const msg = JSON.stringify({
       type: "user",
       session_id: sid,
-      message: { role: "user", content: text },
+      message: { role: "user", content },
       parent_tool_use_id: null,
     });
     this.proc.stdin.write(msg + "\n");
-    console.log("[claude] sent user message");
+    console.log("[claude] sent user message", images ? `(with ${images.length} image(s))` : "");
   }
 
   kill(): void {

@@ -210,35 +210,38 @@ bot.command("new", async (ctx) => {
   await ctx.reply("Session cleared. Send a message to start a new one.");
 });
 
-// --- Handle text messages ---
-bot.on("message:text", async (ctx) => {
-  if (!isAllowed(ctx.chat.id)) {
-    await ctx.reply("Unauthorized.");
-    return;
-  }
+// --- Helper: download Telegram file as base64 ---
+async function downloadFileAsBase64(fileId: string): Promise<{ base64: string; mediaType: string }> {
+  const file = await bot.api.getFile(fileId);
+  const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
+  const res = await fetch(url);
+  const buffer = Buffer.from(await res.arrayBuffer());
+  const ext = file.file_path?.split(".").pop()?.toLowerCase() || "jpg";
+  const mediaTypes: Record<string, string> = {
+    jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+    gif: "image/gif", webp: "image/webp", bmp: "image/bmp",
+  };
+  return { base64: buffer.toString("base64"), mediaType: mediaTypes[ext] || "image/jpeg" };
+}
 
-  const chatId = String(ctx.chat.id);
-  const text = ctx.message.text;
-
-  if (text.startsWith("/")) return;
-
-  const numChatId = ctx.chat.id;
-
-  // Run Claude interaction in background so Grammy can process callback queries
-  // (permission button clicks) while we wait for Claude's response
+// --- Helper: send message to Claude and stream response ---
+async function handleClaudeInteraction(
+  chatId: string,
+  numChatId: number,
+  text: string,
+  images?: Array<{ base64: string; mediaType: string }>,
+): Promise<void> {
   withChatLock(chatId, async () => {
     activeChatId = numChatId;
-
     try {
       const claude = getOrSpawnClaude(chatId);
-      claude.sendMessage(text);
+      claude.sendMessage(text, images);
 
       const draftOffset = (++draftIdCounter) << 8;
       const textStream = streamClaude(claude);
       const api = streamApi(bot.api.raw);
       const messages = await api.streamMessage(numChatId, draftOffset, textStream);
 
-      // Edit final messages with markdown rendering
       for (const msg of messages) {
         try {
           const html = markdownToTelegramHtml(msg.text);
@@ -246,7 +249,6 @@ bot.on("message:text", async (ctx) => {
             parse_mode: "HTML",
           });
         } catch (err) {
-          // If HTML parsing fails, leave the plain text message as-is
           console.error("[bot] markdown render failed, keeping plain text:", (err as Error).message);
         }
       }
@@ -261,6 +263,42 @@ bot.on("message:text", async (ctx) => {
       activeChatId = null;
     }
   });
+}
+
+// --- Handle photos ---
+bot.on("message:photo", async (ctx) => {
+  if (!isAllowed(ctx.chat.id)) {
+    await ctx.reply("Unauthorized.");
+    return;
+  }
+
+  const chatId = String(ctx.chat.id);
+  const caption = ctx.message.caption || "Describe this image.";
+  // Telegram provides multiple sizes; pick the largest
+  const photo = ctx.message.photo[ctx.message.photo.length - 1];
+
+  try {
+    const image = await downloadFileAsBase64(photo.file_id);
+    await handleClaudeInteraction(chatId, ctx.chat.id, caption, [image]);
+  } catch (err) {
+    console.error("[bot] Error downloading photo:", err);
+    await ctx.reply("Failed to process image.");
+  }
+});
+
+// --- Handle text messages ---
+bot.on("message:text", async (ctx) => {
+  if (!isAllowed(ctx.chat.id)) {
+    await ctx.reply("Unauthorized.");
+    return;
+  }
+
+  const chatId = String(ctx.chat.id);
+  const text = ctx.message.text;
+
+  if (text.startsWith("/")) return;
+
+  await handleClaudeInteraction(chatId, ctx.chat.id, text);
 });
 
 // --- Handle inline keyboard callbacks (permission decisions) ---
