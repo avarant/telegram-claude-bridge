@@ -51,6 +51,8 @@ Telegram ←→ Grammy Bot (index.ts)
 - Claude uses the `transcribe` skill (`~/.claude/skills/transcribe/`) to run Whisper locally on the file
 - Transcription uses pywhispercpp with the base model (~147MB VRAM, no conflict with hyprwhspr)
 - Supported formats: ogg, mp3, wav, m4a, flac, opus (converted to 16kHz WAV via ffmpeg)
+- **Claude → Telegram**: Claude generates audio with a TTS skill, then runs `src/send-voice.sh /path/to/audio.ogg` to send it as a Telegram voice message
+- Voice sending logic: `src/send-voice.sh` (script) → `permission-handler.ts` (`/send-voice` endpoint) → `index.ts` (`setSendVoiceHandler` → `sendVoice`)
 
 ## Environment
 

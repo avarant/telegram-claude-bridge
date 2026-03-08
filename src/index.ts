@@ -419,6 +419,16 @@ async function main() {
     console.log("[bot] sent image to chat", activeChatId, ":", imagePath);
   });
 
+  // Register voice sending handler
+  permissionHandler.setSendVoiceHandler(async (voicePath) => {
+    if (!activeChatId) {
+      console.error("[bot] No active chat for voice send");
+      return;
+    }
+    await bot.api.sendVoice(activeChatId, new InputFile(voicePath));
+    console.log("[bot] sent voice to chat", activeChatId, ":", voicePath);
+  });
+
   // Set bot commands so Telegram's menu matches our actual commands
   await bot.api.setMyCommands([
     { command: "start", description: "Welcome & setup info" },
