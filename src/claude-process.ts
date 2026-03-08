@@ -44,11 +44,14 @@ export class ClaudeProcess extends EventEmitter {
       {
         cwd: process.env.HOME || "/home/varant",
         stdio: ["pipe", "pipe", "pipe"],
-        env: Object.fromEntries(
-          Object.entries(process.env).filter(
-            ([k]) => !k.startsWith("CLAUDE") || k === "CLAUDE_API_KEY"
-          )
-        ),
+        env: {
+          ...Object.fromEntries(
+            Object.entries(process.env).filter(
+              ([k]) => !k.startsWith("CLAUDE") || k === "CLAUDE_API_KEY"
+            )
+          ),
+          TELEGRAM_BRIDGE: "1",
+        },
       }
     );
 
