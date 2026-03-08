@@ -393,6 +393,14 @@ bot.catch((err) => {
 // --- Start ---
 async function main() {
   await permissionHandler.start();
+
+  // Set bot commands so Telegram's menu matches our actual commands
+  await bot.api.setMyCommands([
+    { command: "start", description: "Welcome & setup info" },
+    { command: "new", description: "Fresh session" },
+    { command: "id", description: "Show chat ID" },
+  ]);
+
   console.log("[bot] Starting Telegram bot...");
   bot.start({
     onStart: () => console.log("[bot] Bot is running!"),
