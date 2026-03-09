@@ -29,7 +29,8 @@ Telegram ←→ Grammy Bot (index.ts)
 - `src/claude-process.ts` — Claude Code subprocess lifecycle, stream-json message protocol
 - `src/permission-handler.ts` — HTTP IPC server on localhost:19275 for permission request/response flow
 - `src/permission-hook.sh` — Shell script called by Claude's PreToolUse hook, forwards to IPC server
-- `claude-settings.json` — Passed via `--settings` flag, configures PreToolUse hooks
+- `claude-settings.json` — Passed via `--settings` flag, configures PreToolUse hooks (not permissions)
+- `~/.claude/settings.local.json` — Stores persistent always-allow permission rules (written by "Always" button)
 
 ### Key Technical Details
 
