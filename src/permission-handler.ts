@@ -203,7 +203,7 @@ export class PermissionHandler {
         };
         console.log("[permission] new request id:", id, "tool:", toolName);
 
-        const decisionPromise = new Promise<{ allow: boolean; updatedInput?: Record<string, unknown> }>(
+        const decisionPromise = new Promise<{ allow: boolean; updatedInput?: Record<string, unknown>; systemMessage?: string }>(
           (resolve) => {
             const timer = setTimeout(() => {
               this.pending.delete(id);

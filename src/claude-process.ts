@@ -20,7 +20,11 @@ export class ClaudeProcess extends EventEmitter {
     return this.proc !== null && !this.proc.killed;
   }
 
-  spawn(): void {
+  getSessionId(): string | null {
+    return this.sessionId;
+  }
+
+  spawn(resumeSessionId?: string): void {
     if (this.proc) this.kill();
 
     const repoRoot = path.resolve(
@@ -40,19 +44,21 @@ export class ClaudeProcess extends EventEmitter {
 
     // With --input-format stream-json, claude -p reads messages from stdin.
     // No prompt argument needed.
-    this.proc = spawn(
-      "claude",
-      [
-        "-p",
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--settings",
-        JSON.stringify(settings),
-      ],
-      {
+    const args = [
+      "-p",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--settings",
+      JSON.stringify(settings),
+    ];
+    if (resumeSessionId) {
+      args.push("--resume", resumeSessionId);
+    }
+
+    this.proc = spawn("claude", args, {
         cwd: process.env.HOME,
         stdio: ["pipe", "pipe", "pipe"],
         env: {
