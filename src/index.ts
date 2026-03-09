@@ -47,18 +47,30 @@ function isAllowed(chatId: number): boolean {
   return ALLOWED_CHAT_IDS.has(String(chatId));
 }
 
-function getOrSpawnClaude(chatId: string): ClaudeProcess {
+// Track last session ID per chat for /resume
+const lastSessionIds = new Map<string, string>();
+
+function getOrSpawnClaude(chatId: string, resumeSessionId?: string): ClaudeProcess {
   let cp = claudeProcesses.get(chatId);
-  if (cp && cp.isRunning) return cp;
+  if (cp && cp.isRunning && !resumeSessionId) return cp;
+
+  // Kill existing process if resuming
+  if (cp && cp.isRunning) {
+    const sid = cp.getSessionId();
+    if (sid) lastSessionIds.set(chatId, sid);
+    cp.kill();
+  }
 
   cp = new ClaudeProcess();
   claudeProcesses.set(chatId, cp);
 
   cp.on("exit", () => {
-    console.log(`[bot] Claude process for chat ${chatId} exited`);
+    const sid = cp!.getSessionId();
+    if (sid) lastSessionIds.set(chatId, sid);
+    console.log(`[bot] Claude process for chat ${chatId} exited (session: ${sid})`);
   });
 
-  cp.spawn();
+  cp.spawn(resumeSessionId);
   return cp;
 }
 
@@ -204,11 +216,91 @@ bot.command("new", async (ctx) => {
   const chatId = String(ctx.chat.id);
   const existing = claudeProcesses.get(chatId);
   if (existing) {
+    const sid = existing.getSessionId();
+    if (sid) lastSessionIds.set(chatId, sid);
     existing.kill();
     claudeProcesses.delete(chatId);
   }
   permissionHandler.clearSessionRules();
   await ctx.reply("Session cleared. Send a message to start a new one.");
+});
+
+async function getRecentSessions(): Promise<Array<{ sid: string; display: string; timestamp: number }>> {
+  const { readdir, stat, open } = await import("node:fs/promises");
+  const home = process.env.HOME || "/home/varant";
+  const projectDir = `${home}/.claude/projects/-home-varant`;
+
+  const files = await readdir(projectDir);
+  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+
+  const sessions: Array<{ sid: string; display: string; timestamp: number }> = [];
+  for (const file of jsonlFiles) {
+    const filePath = `${projectDir}/${file}`;
+    try {
+      const fileStat = await stat(filePath);
+      const fh = await open(filePath, "r");
+      const firstLine = (await fh.readFile("utf-8")).split("\n")[0];
+      await fh.close();
+      if (!firstLine) continue;
+      const entry = JSON.parse(firstLine);
+      const sid = entry.sessionId || file.replace(".jsonl", "");
+      const display = entry.content || entry.display || "(no message)";
+      sessions.push({ sid, display, timestamp: fileStat.mtimeMs });
+    } catch {
+      continue;
+    }
+  }
+
+  return sessions
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, 8);
+}
+
+bot.command("resume", async (ctx) => {
+  if (!isAllowed(ctx.chat.id)) return;
+
+  const chatId = String(ctx.chat.id);
+  const arg = ctx.match?.trim();
+
+  // If a session ID was provided directly, resume it
+  if (arg) {
+    const existing = claudeProcesses.get(chatId);
+    if (existing) {
+      existing.kill();
+      claudeProcesses.delete(chatId);
+    }
+    permissionHandler.clearSessionRules();
+    await ctx.reply(`Resuming session: ${arg}`);
+    getOrSpawnClaude(chatId, arg);
+    return;
+  }
+
+  // Otherwise show session picker
+  try {
+    const sessions = await getRecentSessions();
+    if (sessions.length === 0) {
+      await ctx.reply("No sessions found.");
+      return;
+    }
+
+    const keyboard = new InlineKeyboard();
+    const lines: string[] = [];
+    for (const s of sessions) {
+      const date = new Date(s.timestamp);
+      const ts = date.toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+      const msg = s.display.length > 40 ? s.display.slice(0, 40) + "…" : s.display;
+      keyboard.text(msg, `resume:${s.sid}`).row();
+      lines.push(`<code>${s.sid.slice(0, 8)}</code> ${ts}\n${msg}`);
+    }
+
+    await ctx.reply(`Pick a session to resume:\n\n${lines.join("\n\n")}`, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
+  } catch (err) {
+    console.error("[bot] Error listing sessions:", err);
+    await ctx.reply("Failed to list sessions.");
+  }
 });
 
 // --- Helper: download Telegram file as base64 ---
@@ -379,6 +471,26 @@ bot.on("callback_query:data", async (ctx) => {
     return;
   }
 
+  // Handle resume session buttons
+  if (data.startsWith("resume:")) {
+    const sessionId = data.slice("resume:".length);
+    const chatId = String(ctx.chat!.id);
+    const existing = claudeProcesses.get(chatId);
+    if (existing) {
+      existing.kill();
+      claudeProcesses.delete(chatId);
+    }
+    permissionHandler.clearSessionRules();
+
+    await ctx.answerCallbackQuery({ text: "Resuming…" });
+    try {
+      await ctx.editMessageText(`Resuming session: ${sessionId}`);
+    } catch { /* message might be too old */ }
+
+    getOrSpawnClaude(chatId, sessionId);
+    return;
+  }
+
   // --- Permission callbacks ---
   if (!data.startsWith("perm:")) return;
 
@@ -465,6 +577,7 @@ async function main() {
   await bot.api.setMyCommands([
     { command: "start", description: "Welcome & setup info" },
     { command: "new", description: "Fresh session" },
+    { command: "resume", description: "Resume previous session" },
     { command: "id", description: "Show chat ID" },
   ]);
 
