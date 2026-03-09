@@ -14,7 +14,7 @@ export type PermissionDecision = "allow" | "allowSession" | "alwaysAllow" | "den
 
 interface PendingPermission {
   request: PermissionRequest;
-  resolve: (decision: { allow: boolean }) => void;
+  resolve: (decision: { allow: boolean; updatedInput?: Record<string, unknown>; systemMessage?: string }) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -31,16 +31,62 @@ export type SendVoiceHandler = (
   voicePath: string
 ) => Promise<void>;
 
+export type SendMessageHandler = (
+  chatId: number,
+  text: string,
+  keyboard: unknown
+) => Promise<number>;
+
+export type EditMessageHandler = (
+  chatId: number,
+  messageId: number,
+  text: string,
+  keyboard?: unknown
+) => Promise<void>;
+
+// --- AskUserQuestion types ---
+
+interface AskOption {
+  label: string;
+  description?: string;
+}
+
+interface AskQuestion {
+  question: string;
+  header?: string;
+  options: AskOption[];
+  multiSelect: boolean;
+}
+
+interface AskSession {
+  requestId: string;
+  shortId: number;
+  chatId: number;
+  messageId: number;
+  questions: AskQuestion[];
+  currentIndex: number;
+  answers: Record<string, string>;
+  selectedOptions: Set<string>;
+  waitingForFreeText: boolean;
+}
+
 export class PermissionHandler {
   private server: http.Server;
   private pending = new Map<string, PendingPermission>();
   private sendPrompt: SendPermissionPrompt;
   private sendImage: SendImageHandler | null = null;
   private sendVoice: SendVoiceHandler | null = null;
+  private sendMsg: SendMessageHandler | null = null;
+  private editMsg: EditMessageHandler | null = null;
   private port: number;
   private timeoutMs = 120_000;
   private sessionRules = new Set<string>();
   private settingsPath: string;
+
+  // AskUserQuestion state
+  private askSessions = new Map<number, AskSession>(); // shortId -> session
+  private askByChat = new Map<number, AskSession>();   // chatId -> active session
+  private askShortIdCounter = 0;
 
   constructor(port: number, sendPrompt: SendPermissionPrompt) {
     this.port = port;
@@ -70,6 +116,14 @@ export class PermissionHandler {
 
   setSendVoiceHandler(handler: SendVoiceHandler): void {
     this.sendVoice = handler;
+  }
+
+  setSendMessageHandler(handler: SendMessageHandler): void {
+    this.sendMsg = handler;
+  }
+
+  setEditMessageHandler(handler: EditMessageHandler): void {
+    this.editMsg = handler;
   }
 
   // Tools that should always prompt the user regardless of rules
@@ -149,7 +203,7 @@ export class PermissionHandler {
         };
         console.log("[permission] new request id:", id, "tool:", toolName);
 
-        const decisionPromise = new Promise<{ allow: boolean }>(
+        const decisionPromise = new Promise<{ allow: boolean; updatedInput?: Record<string, unknown> }>(
           (resolve) => {
             const timer = setTimeout(() => {
               this.pending.delete(id);
@@ -160,8 +214,13 @@ export class PermissionHandler {
           }
         );
 
-        // Send prompt to Telegram
-        await this.sendPrompt(request);
+        // For AskUserQuestion, show interactive question UI instead of permission prompt
+        if (toolName === "AskUserQuestion") {
+          await this.handleAskUserQuestion(id, request, toolInput);
+        } else {
+          // Send normal permission prompt to Telegram
+          await this.sendPrompt(request);
+        }
 
         // Wait for user decision
         const decision = await decisionPromise;
@@ -170,16 +229,19 @@ export class PermissionHandler {
           ? {
               hookSpecificOutput: {
                 hookEventName: "PreToolUse",
-                permissionDecision: "allow",
+                permissionDecision: "allow" as const,
                 permissionDecisionReason: "Approved by user via Telegram",
+                ...(decision.updatedInput && { updatedInput: decision.updatedInput }),
               },
+              ...(decision.systemMessage && { systemMessage: decision.systemMessage }),
             }
           : {
               hookSpecificOutput: {
                 hookEventName: "PreToolUse",
-                permissionDecision: "deny",
-                permissionDecisionReason: "Denied by user via Telegram",
+                permissionDecision: "deny" as const,
+                permissionDecisionReason: decision.systemMessage || "Denied by user via Telegram",
               },
+              ...(decision.systemMessage && { systemMessage: decision.systemMessage }),
             };
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(hookOutput));
@@ -198,6 +260,241 @@ export class PermissionHandler {
       }
     });
   }
+
+  // --- AskUserQuestion handling ---
+
+  private async handleAskUserQuestion(
+    requestId: string,
+    _request: PermissionRequest,
+    toolInput: unknown,
+  ): Promise<void> {
+    const input = toolInput as { questions?: AskQuestion[] };
+    const questions = input.questions;
+
+    if (!questions || questions.length === 0) {
+      // Fall back to normal permission prompt
+      await this.sendPrompt(_request);
+      return;
+    }
+
+    if (!this.sendMsg) {
+      console.error("[ask] no sendMessage handler registered");
+      await this.sendPrompt(_request);
+      return;
+    }
+
+    const chatId = (await this.getActiveChatId());
+    if (!chatId) {
+      console.error("[ask] no active chat ID");
+      await this.sendPrompt(_request);
+      return;
+    }
+
+    const shortId = ++this.askShortIdCounter;
+    const session: AskSession = {
+      requestId,
+      shortId,
+      chatId,
+      messageId: 0,
+      questions,
+      currentIndex: 0,
+      answers: {},
+      selectedOptions: new Set(),
+      waitingForFreeText: false,
+    };
+
+    this.askSessions.set(shortId, session);
+    this.askByChat.set(chatId, session);
+
+    await this.sendCurrentQuestion(session);
+  }
+
+  private activeChatIdRef: number | null = null;
+
+  setActiveChatId(chatId: number | null): void {
+    this.activeChatIdRef = chatId;
+  }
+
+  private async getActiveChatId(): Promise<number | null> {
+    return this.activeChatIdRef;
+  }
+
+  private formatQuestion(q: AskQuestion): string {
+    let text = "";
+    if (q.header) text += `${q.header}\n\n`;
+    text += q.question;
+    if (q.multiSelect) text += "\n\n(Select multiple, then tap Done)";
+    return text;
+  }
+
+  private buildKeyboard(session: AskSession): Array<Array<{ text: string; callback_data: string }>> {
+    const q = session.questions[session.currentIndex];
+    const sid = session.shortId;
+    const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+
+    if (q.multiSelect) {
+      for (let i = 0; i < q.options.length; i++) {
+        const opt = q.options[i];
+        const selected = session.selectedOptions.has(opt.label);
+        const label = selected ? `\u2713 ${opt.label}` : opt.label;
+        rows.push([{ text: label, callback_data: `ask:t:${sid}:${i}` }]);
+      }
+      rows.push([
+        { text: "Other...", callback_data: `ask:o:${sid}` },
+        { text: "Done", callback_data: `ask:d:${sid}` },
+      ]);
+    } else {
+      for (let i = 0; i < q.options.length; i++) {
+        rows.push([{ text: q.options[i].label, callback_data: `ask:s:${sid}:${i}` }]);
+      }
+      rows.push([{ text: "Other...", callback_data: `ask:o:${sid}` }]);
+    }
+
+    return rows;
+  }
+
+  private async sendCurrentQuestion(session: AskSession): Promise<void> {
+    const q = session.questions[session.currentIndex];
+    const text = this.formatQuestion(q);
+    const keyboard = this.buildKeyboard(session);
+
+    if (this.sendMsg) {
+      const msgId = await this.sendMsg(session.chatId, text, { inline_keyboard: keyboard });
+      session.messageId = msgId;
+    }
+  }
+
+  async handleAskCallback(data: string): Promise<{ answered: boolean; text?: string }> {
+    const parts = data.split(":");
+    // ask:<type>:<shortId>[:<optIndex>]
+    const type = parts[1];
+    const shortId = parseInt(parts[2], 10);
+    const session = this.askSessions.get(shortId);
+
+    if (!session) {
+      return { answered: false, text: "Question expired" };
+    }
+
+    const q = session.questions[session.currentIndex];
+
+    if (type === "s") {
+      // Single select
+      const optIdx = parseInt(parts[3], 10);
+      const label = q.options[optIdx]?.label || "Unknown";
+      session.answers[q.question] = label;
+      return this.advanceOrFinish(session, `Selected: ${label}`);
+    }
+
+    if (type === "t") {
+      // Toggle multiSelect
+      const optIdx = parseInt(parts[3], 10);
+      const label = q.options[optIdx]?.label || "Unknown";
+      if (session.selectedOptions.has(label)) {
+        session.selectedOptions.delete(label);
+      } else {
+        session.selectedOptions.add(label);
+      }
+      // Re-render keyboard with updated toggles
+      const keyboard = this.buildKeyboard(session);
+      const text = this.formatQuestion(q);
+      if (this.editMsg) {
+        await this.editMsg(session.chatId, session.messageId, text, { inline_keyboard: keyboard });
+      }
+      return { answered: false, text: label };
+    }
+
+    if (type === "d") {
+      // Done (multiSelect)
+      const selected = Array.from(session.selectedOptions);
+      session.answers[q.question] = selected.join(", ");
+      session.selectedOptions.clear();
+      return this.advanceOrFinish(session, `Selected: ${selected.join(", ")}`);
+    }
+
+    if (type === "o") {
+      // Other - wait for free text
+      session.waitingForFreeText = true;
+      if (this.editMsg) {
+        await this.editMsg(session.chatId, session.messageId, `${this.formatQuestion(q)}\n\nType your answer:`);
+      }
+      return { answered: false, text: "Type your answer" };
+    }
+
+    return { answered: false };
+  }
+
+  async handlePossibleFreeText(chatId: number, text: string): Promise<boolean> {
+    const session = this.askByChat.get(chatId);
+    if (!session || !session.waitingForFreeText) return false;
+
+    session.waitingForFreeText = false;
+    const q = session.questions[session.currentIndex];
+
+    if (q.multiSelect) {
+      // Add free text to selections, re-show keyboard
+      session.selectedOptions.add(text);
+      const keyboard = this.buildKeyboard(session);
+      const questionText = this.formatQuestion(q);
+      if (this.editMsg) {
+        await this.editMsg(session.chatId, session.messageId, questionText, { inline_keyboard: keyboard });
+      }
+    } else {
+      session.answers[q.question] = text;
+      await this.advanceOrFinish(session, `Answered: ${text}`);
+    }
+
+    return true;
+  }
+
+  private async advanceOrFinish(
+    session: AskSession,
+    confirmText: string,
+  ): Promise<{ answered: boolean; text: string }> {
+    session.currentIndex++;
+
+    // Edit the answered question message to show confirmation
+    if (this.editMsg) {
+      const prevQ = session.questions[session.currentIndex - 1];
+      const headerLine = prevQ.header ? `${prevQ.header}\n\n` : "";
+      await this.editMsg(
+        session.chatId,
+        session.messageId,
+        `${headerLine}${prevQ.question}\n\n${confirmText}`
+      );
+    }
+
+    if (session.currentIndex < session.questions.length) {
+      // More questions - send next
+      session.selectedOptions.clear();
+      await this.sendCurrentQuestion(session);
+      return { answered: false, text: confirmText };
+    }
+
+    // All done — deny the tool (AskUserQuestion UI doesn't work in headless mode)
+    // but pass the answers via systemMessage so Claude receives them.
+    const pending = this.pending.get(session.requestId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pending.delete(session.requestId);
+
+      const answersFormatted = Object.entries(session.answers)
+        .map(([q, a]) => `"${q}" = "${a}"`)
+        .join("\n");
+
+      pending.resolve({
+        allow: false,
+        systemMessage: `The user answered your questions via Telegram (AskUserQuestion is not supported in headless mode, but the answers were collected successfully):\n${answersFormatted}\n\nProceed using these answers.`,
+      });
+    }
+
+    // Clean up
+    this.askSessions.delete(session.shortId);
+    this.askByChat.delete(session.chatId);
+
+    return { answered: true, text: confirmText };
+  }
+
+  // --- Image/Voice handling (unchanged) ---
 
   private handleSendImage(
     req: http.IncomingMessage,
@@ -300,5 +597,7 @@ export class PermissionHandler {
       pending.resolve({ allow: false });
     }
     this.pending.clear();
+    this.askSessions.clear();
+    this.askByChat.clear();
   }
 }

@@ -234,6 +234,7 @@ async function handleClaudeInteraction(
 ): Promise<void> {
   withChatLock(chatId, async () => {
     activeChatId = numChatId;
+    permissionHandler.setActiveChatId(numChatId);
     try {
       const claude = getOrSpawnClaude(chatId);
       claude.sendMessage(text, images);
@@ -262,6 +263,7 @@ async function handleClaudeInteraction(
       await bot.api.sendMessage(numChatId, "Error processing message.").catch(() => {});
     } finally {
       activeChatId = null;
+      permissionHandler.setActiveChatId(null);
     }
   });
 }
@@ -353,13 +355,31 @@ bot.on("message:text", async (ctx) => {
 
   if (text.startsWith("/")) return;
 
+  // Check if this is a free-text answer for an AskUserQuestion
+  const handled = await permissionHandler.handlePossibleFreeText(ctx.chat.id, text);
+  if (handled) return;
+
   await handleClaudeInteraction(chatId, ctx.chat.id, text);
 });
 
-// --- Handle inline keyboard callbacks (permission decisions) ---
+// --- Handle inline keyboard callbacks (permission decisions + AskUserQuestion) ---
 bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data;
   console.log("[bot] callback_query received:", data);
+
+  // --- AskUserQuestion callbacks ---
+  if (data.startsWith("ask:")) {
+    try {
+      const result = await permissionHandler.handleAskCallback(data);
+      await ctx.answerCallbackQuery({ text: result.text || "OK" });
+    } catch (err) {
+      console.error("[bot] ask callback error:", (err as Error).message);
+      await ctx.answerCallbackQuery({ text: "Error" }).catch(() => {});
+    }
+    return;
+  }
+
+  // --- Permission callbacks ---
   if (!data.startsWith("perm:")) return;
 
   const parts = data.split(":");
@@ -427,6 +447,18 @@ async function main() {
     }
     await bot.api.sendVoice(activeChatId, new InputFile(voicePath));
     console.log("[bot] sent voice to chat", activeChatId, ":", voicePath);
+  });
+
+  // Register message sending/editing handlers for AskUserQuestion
+  permissionHandler.setSendMessageHandler(async (chatId, text, keyboard) => {
+    const msg = await bot.api.sendMessage(chatId, text, { reply_markup: keyboard as any });
+    return msg.message_id;
+  });
+
+  permissionHandler.setEditMessageHandler(async (chatId, messageId, text, keyboard?) => {
+    await bot.api.editMessageText(chatId, messageId, text, {
+      reply_markup: keyboard as any,
+    });
   });
 
   // Set bot commands so Telegram's menu matches our actual commands
