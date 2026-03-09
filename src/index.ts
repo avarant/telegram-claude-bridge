@@ -315,7 +315,7 @@ bot.command("resume", async (ctx) => {
   }
 });
 
-// --- Helper: download Telegram file as base64 ---
+// --- Helper: download Telegram file as base64 (also saves to /tmp) ---
 async function downloadFileAsBase64(fileId: string): Promise<{ base64: string; mediaType: string }> {
   const file = await bot.api.getFile(fileId);
   const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
@@ -326,6 +326,9 @@ async function downloadFileAsBase64(fileId: string): Promise<{ base64: string; m
     jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
     gif: "image/gif", webp: "image/webp", bmp: "image/bmp",
   };
+  const savePath = `/tmp/telegram_photo_${Date.now()}.${ext}`;
+  await writeFile(savePath, buffer);
+  console.log(`[bot] saved photo to ${savePath}`);
   return { base64: buffer.toString("base64"), mediaType: mediaTypes[ext] || "image/jpeg" };
 }
 
