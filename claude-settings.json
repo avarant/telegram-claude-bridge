@@ -13,14 +13,16 @@
   },
   "permissions": {
     "allow": [
-      "EnterPlanMode",
+      "Skill",
+      "Bash",
+      "ToolSearch",
       "Agent",
       "Read",
-      "Glob",
+      "WebSearch",
+      "WebFetch",
+      "Grep",
       "Write",
       "ExitPlanMode",
-      "Bash",
-      "Grep",
       "Edit"
     ]
   }
