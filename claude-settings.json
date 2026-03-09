@@ -11,19 +11,5 @@
       }
     ]
   },
-  "permissions": {
-    "allow": [
-      "Skill",
-      "Bash",
-      "ToolSearch",
-      "Agent",
-      "Read",
-      "WebSearch",
-      "WebFetch",
-      "Grep",
-      "Write",
-      "ExitPlanMode",
-      "Edit"
-    ]
-  }
+  "permissions": {}
 }

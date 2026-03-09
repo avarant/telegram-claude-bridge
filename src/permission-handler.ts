@@ -1,5 +1,6 @@
 import http from "http";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { v4 as uuidv4 } from "uuid";
 
@@ -91,10 +92,9 @@ export class PermissionHandler {
   constructor(port: number, sendPrompt: SendPermissionPrompt) {
     this.port = port;
     this.sendPrompt = sendPrompt;
-    this.settingsPath = path.resolve(
-      path.dirname(new URL(import.meta.url).pathname),
-      "../claude-settings.json"
+    this.settingsPath = path.join(os.homedir(), ".claude", "settings.local.json"
     );
+    this.loadAlwaysAllowRules();
 
     this.server = http.createServer((req, res) => {
       if (req.method === "POST" && req.url === "/permission") {
@@ -130,6 +130,22 @@ export class PermissionHandler {
   // (e.g. ExitPlanMode requires reviewing the plan each time)
   private static ALWAYS_PROMPT = new Set(["ExitPlanMode"]);
 
+  private loadAlwaysAllowRules(): void {
+    try {
+      const raw = fs.readFileSync(this.settingsPath, "utf-8");
+      const settings = JSON.parse(raw);
+      const allow = settings?.permissions?.allow;
+      if (Array.isArray(allow)) {
+        for (const rule of allow) {
+          this.sessionRules.add(rule);
+        }
+        console.log("[permission] loaded always-allow rules:", [...this.sessionRules]);
+      }
+    } catch {
+      // File doesn't exist yet — no rules to load
+    }
+  }
+
   private isAutoAllowed(toolName: string): boolean {
     if (PermissionHandler.ALWAYS_PROMPT.has(toolName)) return false;
     return this.sessionRules.has(toolName);
@@ -137,13 +153,19 @@ export class PermissionHandler {
 
   private addAlwaysAllow(toolName: string): void {
     try {
-      const raw = fs.readFileSync(this.settingsPath, "utf-8");
-      const settings = JSON.parse(raw);
+      let settings: Record<string, unknown> = {};
+      try {
+        const raw = fs.readFileSync(this.settingsPath, "utf-8");
+        settings = JSON.parse(raw);
+      } catch {
+        // File doesn't exist yet — start fresh
+      }
       if (!settings.permissions) settings.permissions = {};
-      if (!Array.isArray(settings.permissions.allow)) settings.permissions.allow = [];
-      const rule = toolName;
-      if (!settings.permissions.allow.includes(rule)) {
-        settings.permissions.allow.push(rule);
+      const perms = settings.permissions as Record<string, unknown>;
+      if (!Array.isArray(perms.allow)) perms.allow = [];
+      if (!(perms.allow as string[]).includes(toolName)) {
+        (perms.allow as string[]).push(toolName);
+        fs.mkdirSync(path.dirname(this.settingsPath), { recursive: true });
         fs.writeFileSync(this.settingsPath, JSON.stringify(settings, null, 2) + "\n");
         console.log("[permission] added always-allow rule for:", toolName);
       }
@@ -154,7 +176,8 @@ export class PermissionHandler {
 
   clearSessionRules(): void {
     this.sessionRules.clear();
-    console.log("[permission] session rules cleared");
+    this.loadAlwaysAllowRules();
+    console.log("[permission] session rules cleared (always-allow rules reloaded)");
   }
 
   private handlePermissionRequest(
