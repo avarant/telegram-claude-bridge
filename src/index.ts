@@ -179,15 +179,27 @@ const permissionHandler = new PermissionHandler(
       return;
     }
 
-    const inputStr =
-      typeof request.toolInput === "object"
-        ? JSON.stringify(request.toolInput, null, 2)
-        : String(request.toolInput);
+    let inputLines: string;
+    if (typeof request.toolInput === "object" && request.toolInput !== null) {
+      inputLines = Object.entries(request.toolInput)
+        .map(([key, value]) => {
+          let valStr: string;
+          if (typeof value === "string") {
+            valStr = value.length > 300 ? value.slice(0, 300) + "…" : value;
+          } else {
+            valStr = JSON.stringify(value);
+          }
+          return `${key}: ${valStr}`;
+        })
+        .join("\n");
+    } else {
+      inputLines = String(request.toolInput);
+    }
 
     const truncatedInput =
-      inputStr.length > 2000 ? inputStr.slice(0, 2000) + "\n..." : inputStr;
+      inputLines.length > 2000 ? inputLines.slice(0, 2000) + "\n..." : inputLines;
 
-    const text = `Permission Request\n\nTool: ${request.toolName}\n\nInput:\n${truncatedInput}`;
+    const text = `Permission Request\n\nTool: ${request.toolName}\n\n${truncatedInput}`;
 
     const keyboard = new InlineKeyboard()
       .text("Allow", `perm:allow:${request.id}`)
