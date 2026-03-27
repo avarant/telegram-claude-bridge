@@ -588,6 +588,15 @@ async function main() {
     });
   });
 
+  // Register inject message handler for cron jobs / external triggers
+  permissionHandler.setInjectMessageHandler(async (text, chatId?) => {
+    const targetChatId = chatId || [...ALLOWED_CHAT_IDS][0];
+    if (!targetChatId) throw new Error("No allowed chat ID configured");
+    const numChatId = parseInt(targetChatId, 10);
+    console.log(`[bot] injected message to chat ${numChatId}: ${text.slice(0, 80)}...`);
+    handleClaudeInteraction(targetChatId, numChatId, text);
+  });
+
   // Set bot commands so Telegram's menu matches our actual commands
   await bot.api.setMyCommands([
     { command: "start", description: "Welcome & setup info" },

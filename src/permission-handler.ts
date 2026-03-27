@@ -32,6 +32,11 @@ export type SendVoiceHandler = (
   voicePath: string
 ) => Promise<void>;
 
+export type InjectMessageHandler = (
+  text: string,
+  chatId?: string
+) => Promise<void>;
+
 export type SendMessageHandler = (
   chatId: number,
   text: string,
@@ -77,6 +82,7 @@ export class PermissionHandler {
   private sendPrompt: SendPermissionPrompt;
   private sendImage: SendImageHandler | null = null;
   private sendVoice: SendVoiceHandler | null = null;
+  private injectMessage: InjectMessageHandler | null = null;
   private sendMsg: SendMessageHandler | null = null;
   private editMsg: EditMessageHandler | null = null;
   private port: number;
@@ -103,6 +109,8 @@ export class PermissionHandler {
         this.handleSendImage(req, res);
       } else if (req.method === "POST" && req.url === "/send-voice") {
         this.handleSendVoice(req, res);
+      } else if (req.method === "POST" && req.url === "/send-message") {
+        this.handleInjectMessage(req, res);
       } else {
         res.writeHead(404);
         res.end("Not found");
@@ -116,6 +124,10 @@ export class PermissionHandler {
 
   setSendVoiceHandler(handler: SendVoiceHandler): void {
     this.sendVoice = handler;
+  }
+
+  setInjectMessageHandler(handler: InjectMessageHandler): void {
+    this.injectMessage = handler;
   }
 
   setSendMessageHandler(handler: SendMessageHandler): void {
@@ -573,6 +585,36 @@ export class PermissionHandler {
         res.end(JSON.stringify({ ok: true }));
       } catch (err) {
         console.error("[permission] error sending voice:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: (err as Error).message }));
+      }
+    });
+  }
+
+  private handleInjectMessage(
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): void {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", async () => {
+      try {
+        const { text, chatId } = JSON.parse(body);
+        if (!text) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing 'text' field" }));
+          return;
+        }
+        if (!this.injectMessage) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "No message handler registered" }));
+          return;
+        }
+        await this.injectMessage(text, chatId);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (err) {
+        console.error("[permission] error injecting message:", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: (err as Error).message }));
       }
