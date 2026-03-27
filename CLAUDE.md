@@ -73,6 +73,60 @@ Telegram ←→ Grammy Bot (index.ts)
 - `ALLOWED_CHAT_IDS` — Comma-separated list of authorized chat IDs
 - `PERMISSION_PORT` — IPC server port (default: 19275)
 
+## Scheduled Messages / Cron Jobs
+
+The bridge exposes a `/send-message` HTTP endpoint on the IPC server (localhost:19275) that allows external processes to inject messages into the active Claude session. The message flows through the same pipeline as Telegram messages — Claude processes it and the response streams back to Telegram.
+
+**Endpoint**: `POST http://localhost:19275/send-message`
+
+**Body**: `{"text": "your prompt", "chatId": "optional — defaults to first ALLOWED_CHAT_ID"}`
+
+**Example** (one-shot curl):
+```bash
+curl -s localhost:19275/send-message \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "say hi to Mher"}'
+```
+
+**Setting up a recurring cron job with systemd timers** (Arch Linux, no cron installed):
+
+1. Create a service file at `~/.config/systemd/user/<name>.service`:
+```ini
+[Unit]
+Description=<description>
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/curl -s localhost:19275/send-message -H "Content-Type: application/json" -d '{"text": "<your prompt>"}'
+```
+
+2. Create a timer file at `~/.config/systemd/user/<name>.timer`:
+```ini
+[Unit]
+Description=<description> (timer)
+
+[Timer]
+OnCalendar=*-*-* 09:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+3. Enable and start:
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now <name>.timer
+```
+
+**OnCalendar examples**: `*-*-* 09:00:00` (daily 9am), `Mon *-*-* 09:00:00` (Mondays 9am), `*-*-* *:00,30:00` (every 30 min)
+
+**Management**:
+- List timers: `systemctl --user list-timers`
+- Stop: `systemctl --user stop <name>.timer`
+- Disable: `systemctl --user disable <name>.timer`
+- Remove: stop + disable, then delete the `.service` and `.timer` files, run `systemctl --user daemon-reload`
+
 ## systemd Service
 
 The bridge can run as a systemd user service for auto-start on login and auto-restart on crash. See the "Running as a systemd service" section in README.md for setup. Key commands:
