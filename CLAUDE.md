@@ -134,3 +134,7 @@ The bridge can run as a systemd user service for auto-start on login and auto-re
 - `systemctl --user status telegram-claude-bridge` — check status
 - `systemctl --user restart telegram-claude-bridge` — restart after code changes
 - `journalctl --user -u telegram-claude-bridge -f` — tail logs
+
+## Known Issues
+
+- **Sensitive file edits blocked in headless mode** — The bridge runs `claude -p` (headless). Claude Code has an internal sensitive file gate (for `.zshrc`, `.bashrc`, `.env`, etc.) that is separate from PreToolUse hooks. Even when the hook returns "allow" (user tapped Allow on Telegram), Claude Code's internal check auto-denies because there's no terminal UI to show the second confirmation prompt. This does NOT happen in interactive terminal Claude Code. Workaround: use Python or Bash to edit sensitive files directly (bypasses Claude Code's Edit/Write tools). May be a Claude Code bug worth filing.
