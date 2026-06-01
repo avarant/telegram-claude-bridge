@@ -387,6 +387,23 @@ async function downloadAudioFile(fileId: string): Promise<string> {
   return path;
 }
 
+// --- Helper: download Telegram document (CSV, PDF, etc.) to disk ---
+async function downloadDocumentFile(fileId: string, originalName?: string): Promise<string> {
+  const file = await bot.api.getFile(fileId);
+  const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
+  const res = await fetch(url);
+  const buffer = Buffer.from(await res.arrayBuffer());
+  // Prefer the original filename (sanitized) so e.g. spend.csv keeps its name;
+  // fall back to extension from Telegram's stored path.
+  const fallbackExt = file.file_path?.split(".").pop()?.toLowerCase() || "bin";
+  const safeName = originalName
+    ? originalName.replace(/[^A-Za-z0-9._-]/g, "_")
+    : `document.${fallbackExt}`;
+  const path = `/tmp/telegram_document_${Date.now()}_${safeName}`;
+  await writeFile(path, buffer);
+  return path;
+}
+
 // --- Handle voice messages ---
 bot.on("message:voice", async (ctx) => {
   if (!isAllowed(ctx.chat.id)) {
@@ -426,6 +443,30 @@ bot.on("message:audio", async (ctx) => {
   } catch (err) {
     console.error("[bot] Error processing audio file:", err);
     await ctx.reply("Failed to process audio file.");
+  }
+});
+
+// --- Handle documents (CSV, PDF, txt, etc. — anything attached as a file) ---
+bot.on("message:document", async (ctx) => {
+  if (!isAllowed(ctx.chat.id)) {
+    await ctx.reply("Unauthorized.");
+    return;
+  }
+
+  const chatId = String(ctx.chat.id);
+  try {
+    const docPath = await downloadDocumentFile(
+      ctx.message.document.file_id,
+      ctx.message.document.file_name,
+    );
+    const caption = ctx.message.caption || "";
+    const text = caption
+      ? `[Document received at ${docPath}] ${caption}`
+      : `[Document received at ${docPath}]`;
+    await handleClaudeInteraction(chatId, ctx.chat.id, text);
+  } catch (err) {
+    console.error("[bot] Error processing document:", err);
+    await ctx.reply("Failed to process document.");
   }
 });
 

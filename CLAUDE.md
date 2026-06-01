@@ -46,6 +46,11 @@ Telegram ←→ Grammy Bot (index.ts)
 - **Claude → Telegram**: Claude runs `src/send-image.sh /path/to/image.png "caption"` which POSTs to the bridge's IPC server (`/send-image` endpoint). The bridge sends the file as a Telegram photo via `sendPhoto`.
 - Image sending logic: `src/send-image.sh` (script) → `permission-handler.ts` (`/send-image` endpoint) → `index.ts` (`setSendImageHandler`)
 
+## Documents (CSV, PDF, txt, …)
+
+- **Telegram → Claude**: Any non-photo/voice/audio file attachment goes through `message:document`. The bridge downloads it to `/tmp/telegram_document_<timestamp>_<original-name-sanitized>` (preserving the original filename + extension so e.g. `spend.csv` keeps its extension for tools like `pandas` / `csvkit`) and passes a text message to Claude: `[Document received at /tmp/telegram_document_…]` plus any caption the user added.
+- Filename sanitization: anything not in `[A-Za-z0-9._-]` is replaced with `_`. If Telegram doesn't supply a filename, the name falls back to `document.<ext>`.
+
 ## Voice Messages / Audio
 
 - **Telegram → Claude**: Voice messages and audio files are downloaded to `/tmp/telegram_voice_<timestamp>.<ext>` and passed to Claude as a text message with the file path (e.g. `[Voice message received at /tmp/telegram_voice_123.ogg]`)
