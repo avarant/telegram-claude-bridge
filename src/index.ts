@@ -2,10 +2,10 @@ import "dotenv/config";
 import { writeFile } from "node:fs/promises";
 import { Bot, InlineKeyboard, InputFile, type Context } from "grammy";
 import { autoRetry } from "@grammyjs/auto-retry";
-import { stream, streamApi, type StreamFlavor } from "@grammyjs/stream";
+import { stream, type StreamFlavor } from "@grammyjs/stream";
 import { ClaudeProcess } from "./claude-process.js";
 import { PermissionHandler, PermissionRequest, PermissionDecision } from "./permission-handler.js";
-import { markdownToTelegramHtml } from "./markdown.js";
+import { markdownToTelegramHtml, escapeHtml } from "./markdown.js";
 
 type MyContext = StreamFlavor<Context>;
 
@@ -27,8 +27,6 @@ const permissionChatMap = new Map<string, number>();
 let activeChatId: number | null = null;
 // Per-chat message queue to prevent concurrent sends
 const chatLocks = new Map<string, Promise<void>>();
-// Draft ID counter to avoid clashes between concurrent streams
-let draftIdCounter = 0;
 
 function withChatLock(chatId: string, fn: () => Promise<void>): Promise<void> {
   const prev = chatLocks.get(chatId) ?? Promise.resolve();
@@ -237,36 +235,105 @@ bot.command("new", async (ctx) => {
   await ctx.reply("Session cleared. Send a message to start a new one.");
 });
 
-async function getRecentSessions(): Promise<Array<{ sid: string; display: string; timestamp: number }>> {
-  const { readdir, stat, open } = await import("node:fs/promises");
-  const home = process.env.HOME || "/home/varant";
-  const projectDir = `${home}/.claude/projects/-home-varant`;
+const SESSIONS_DIR = `${process.env.HOME || "/home/varant"}/.claude/projects/-home-varant`;
 
-  const files = await readdir(projectDir);
-  const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
+// Read enough of a session file to find its title without loading multi-MB
+// transcripts: an ai-title/summary line near the top, else the first user message.
+async function getSessionTitle(filePath: string): Promise<string> {
+  const { open } = await import("node:fs/promises");
+  const fh = await open(filePath, "r");
+  const buf = Buffer.alloc(65536);
+  const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+  await fh.close();
 
-  const sessions: Array<{ sid: string; display: string; timestamp: number }> = [];
-  for (const file of jsonlFiles) {
-    const filePath = `${projectDir}/${file}`;
+  let fallback = "";
+  for (const line of buf.subarray(0, bytesRead).toString("utf-8").split("\n")) {
+    if (!line.trim()) continue;
+    let entry: any;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue; // truncated last line in the buffer
+    }
+    if (entry.type === "ai-title" && entry.aiTitle) return entry.aiTitle;
+    if (entry.type === "summary" && entry.summary) return entry.summary;
+    if (!fallback && entry.type === "user" && entry.message?.content) {
+      const c = entry.message.content;
+      if (typeof c === "string") fallback = c;
+      else if (Array.isArray(c)) {
+        fallback = c
+          .filter((b: any) => b.type === "text" && b.text)
+          .map((b: any) => b.text)
+          .join(" ");
+      }
+    }
+  }
+  return fallback;
+}
+
+async function getRecentSessions(limit = 10): Promise<Array<{ sid: string; title: string; timestamp: number }>> {
+  const { readdir, stat } = await import("node:fs/promises");
+  const files = (await readdir(SESSIONS_DIR)).filter((f) => f.endsWith(".jsonl"));
+
+  const sessions: Array<{ sid: string; title: string; timestamp: number }> = [];
+  for (const file of files) {
+    const filePath = `${SESSIONS_DIR}/${file}`;
     try {
       const fileStat = await stat(filePath);
-      const fh = await open(filePath, "r");
-      const firstLine = (await fh.readFile("utf-8")).split("\n")[0];
-      await fh.close();
-      if (!firstLine) continue;
-      const entry = JSON.parse(firstLine);
-      const sid = entry.sessionId || file.replace(".jsonl", "");
-      const display = entry.content || entry.display || "(no message)";
-      sessions.push({ sid, display, timestamp: fileStat.mtimeMs });
+      const title = (await getSessionTitle(filePath)).replace(/\s+/g, " ").trim();
+      sessions.push({
+        sid: file.replace(".jsonl", ""),
+        title: title || "(no title)",
+        timestamp: fileStat.mtimeMs,
+      });
     } catch {
       continue;
     }
   }
 
-  return sessions
-    .sort((a, b) => b.timestamp - a.timestamp)
-    .slice(0, 8);
+  return sessions.sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
 }
+
+function formatSessionList(sessions: Array<{ sid: string; title: string; timestamp: number }>): string {
+  return sessions
+    .map((s) => {
+      const ts = new Date(s.timestamp).toLocaleDateString("en-US", {
+        month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+      });
+      const title = s.title.length > 60 ? s.title.slice(0, 60) + "…" : s.title;
+      return `<b>${escapeHtml(title)}</b>\n<code>${s.sid}</code> · ${ts}`;
+    })
+    .join("\n\n");
+}
+
+// Resolve a full or prefix session ID to a session file's full ID.
+async function resolveSessionId(arg: string): Promise<{ sid?: string; error?: string }> {
+  const { readdir } = await import("node:fs/promises");
+  const files = (await readdir(SESSIONS_DIR)).filter((f) => f.endsWith(".jsonl"));
+  const matches = files.filter((f) => f.startsWith(arg)).map((f) => f.replace(".jsonl", ""));
+  if (matches.length === 1) return { sid: matches[0] };
+  if (matches.length === 0) return { error: `No session found matching "${arg}". Use /list to see recent sessions.` };
+  return { error: `"${arg}" matches ${matches.length} sessions — use a longer prefix or the full ID.` };
+}
+
+bot.command("list", async (ctx) => {
+  if (!isAllowed(ctx.chat.id)) return;
+
+  try {
+    const sessions = await getRecentSessions();
+    if (sessions.length === 0) {
+      await ctx.reply("No sessions found.");
+      return;
+    }
+    await ctx.reply(
+      `Recent sessions (resume with /resume &lt;id&gt;):\n\n${formatSessionList(sessions)}`,
+      { parse_mode: "HTML" }
+    );
+  } catch (err) {
+    console.error("[bot] Error listing sessions:", err);
+    await ctx.reply("Failed to list sessions.");
+  }
+});
 
 bot.command("resume", async (ctx) => {
   if (!isAllowed(ctx.chat.id)) return;
@@ -274,45 +341,25 @@ bot.command("resume", async (ctx) => {
   const chatId = String(ctx.chat.id);
   const arg = ctx.match?.trim();
 
-  // If a session ID was provided directly, resume it
-  if (arg) {
-    const existing = claudeProcesses.get(chatId);
-    if (existing) {
-      existing.kill();
-      claudeProcesses.delete(chatId);
-    }
-    permissionHandler.clearSessionRules();
-    await ctx.reply(`Resuming session: ${arg}`);
-    getOrSpawnClaude(chatId, arg);
+  if (!arg) {
+    await ctx.reply("Usage: /resume <session-id> (full ID or unique prefix). Use /list to see recent sessions.");
     return;
   }
 
-  // Otherwise show session picker
-  try {
-    const sessions = await getRecentSessions();
-    if (sessions.length === 0) {
-      await ctx.reply("No sessions found.");
-      return;
-    }
-
-    const keyboard = new InlineKeyboard();
-    const lines: string[] = [];
-    for (const s of sessions) {
-      const date = new Date(s.timestamp);
-      const ts = date.toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-      const msg = s.display.length > 40 ? s.display.slice(0, 40) + "…" : s.display;
-      keyboard.text(msg, `resume:${s.sid}`).row();
-      lines.push(`<code>${s.sid.slice(0, 8)}</code> ${ts}\n${msg}`);
-    }
-
-    await ctx.reply(`Pick a session to resume:\n\n${lines.join("\n\n")}`, {
-      parse_mode: "HTML",
-      reply_markup: keyboard,
-    });
-  } catch (err) {
-    console.error("[bot] Error listing sessions:", err);
-    await ctx.reply("Failed to list sessions.");
+  const { sid, error } = await resolveSessionId(arg);
+  if (!sid) {
+    await ctx.reply(error!);
+    return;
   }
+
+  const existing = claudeProcesses.get(chatId);
+  if (existing) {
+    existing.kill();
+    claudeProcesses.delete(chatId);
+  }
+  permissionHandler.clearSessionRules();
+  await ctx.reply(`Resuming session: ${sid}`);
+  getOrSpawnClaude(chatId, sid);
 });
 
 // --- Helper: download Telegram file as base64 (also saves to /tmp) ---
@@ -332,6 +379,59 @@ async function downloadFileAsBase64(fileId: string): Promise<{ base64: string; m
   return { base64: buffer.toString("base64"), mediaType: mediaTypes[ext] || "image/jpeg" };
 }
 
+// Telegram's hard limit is 4096 chars per message. We render markdown to HTML,
+// which expands length (e.g. "<" -> "&lt;", added <b>/<pre> tags), so a chunk
+// that fits as plain text can bust the limit as HTML. Chunk against a target
+// below 4096 measured on the *rendered HTML* to stay safe with headroom.
+const TG_HTML_TARGET = 3800;
+
+// Split plain markdown into pieces whose rendered HTML each stays within the
+// Telegram limit. Splits on line boundaries; hard-splits a single line whose
+// HTML alone is too large (rare — e.g. one enormous unbroken line).
+function chunkMarkdown(plain: string): string[] {
+  const htmlLen = (s: string) => markdownToTelegramHtml(s).length;
+  const chunks: string[] = [];
+  let cur: string[] = [];
+  const flush = () => {
+    if (cur.length > 0) {
+      chunks.push(cur.join("\n"));
+      cur = [];
+    }
+  };
+  for (const line of plain.split("\n")) {
+    // Start a new chunk if appending this line would overflow the current one.
+    if (cur.length > 0 && htmlLen([...cur, line].join("\n")) > TG_HTML_TARGET) {
+      flush();
+    }
+    if (htmlLen(line) > TG_HTML_TARGET) {
+      // A single line's HTML exceeds the target on its own: hard-split on plain
+      // chars. HTML can expand ~4x worst case, so step at a quarter of target.
+      flush();
+      const step = Math.max(256, Math.floor(TG_HTML_TARGET / 4));
+      for (let j = 0; j < line.length; j += step) chunks.push(line.slice(j, j + step));
+    } else {
+      cur.push(line);
+    }
+  }
+  flush();
+  return chunks;
+}
+
+// Deliver plain markdown as one or more Telegram messages: render each chunk to
+// HTML, falling back to plain text if Telegram rejects the HTML. Never throws —
+// send failures are logged and swallowed so a delivery problem can't wedge the
+// per-chat lock.
+async function deliverMarkdown(chatId: number, plain: string): Promise<void> {
+  for (const chunk of chunkMarkdown(plain)) {
+    try {
+      await bot.api.sendMessage(chatId, markdownToTelegramHtml(chunk), { parse_mode: "HTML" });
+    } catch (err) {
+      console.error("[bot] HTML send failed, retrying as plain text:", (err as Error).message);
+      await bot.api.sendMessage(chatId, chunk).catch(() => {});
+    }
+  }
+}
+
 // --- Helper: send message to Claude and stream response ---
 async function handleClaudeInteraction(
   chatId: string,
@@ -346,23 +446,28 @@ async function handleClaudeInteraction(
       const claude = getOrSpawnClaude(chatId);
       claude.sendMessage(text, images);
 
-      const draftOffset = (++draftIdCounter) << 8;
-      const textStream = streamClaude(claude);
-      const api = streamApi(bot.api.raw);
-      const messages = await api.streamMessage(numChatId, draftOffset, textStream);
+      // Show a "typing…" indicator while Claude works (it auto-expires after
+      // ~5s, so refresh it) — this is the only live feedback; the answer is
+      // sent once, when complete.
+      await bot.api.sendChatAction(numChatId, "typing").catch(() => {});
+      const typing = setInterval(() => {
+        bot.api.sendChatAction(numChatId, "typing").catch(() => {});
+      }, 5000);
 
-      for (const msg of messages) {
-        try {
-          const html = markdownToTelegramHtml(msg.text);
-          await bot.api.editMessageText(numChatId, msg.message_id, html, {
-            parse_mode: "HTML",
-          });
-        } catch (err) {
-          console.error("[bot] markdown render failed, keeping plain text:", (err as Error).message);
+      // Wait for the complete response, then send it once as formatted HTML
+      // (chunked across multiple messages only if it exceeds Telegram's limit).
+      let fullText = "";
+      try {
+        for await (const chunk of streamClaude(claude)) {
+          fullText += chunk;
         }
+      } finally {
+        clearInterval(typing);
       }
 
-      if (messages.length === 0) {
+      if (fullText.trim()) {
+        await deliverMarkdown(numChatId, fullText);
+      } else {
         await bot.api.sendMessage(numChatId, "(No response from Claude)");
       }
     } catch (err) {
@@ -527,23 +632,9 @@ bot.on("callback_query:data", async (ctx) => {
     return;
   }
 
-  // Handle resume session buttons
+  // Resume buttons were removed — nudge anyone tapping one on an old message
   if (data.startsWith("resume:")) {
-    const sessionId = data.slice("resume:".length);
-    const chatId = String(ctx.chat!.id);
-    const existing = claudeProcesses.get(chatId);
-    if (existing) {
-      existing.kill();
-      claudeProcesses.delete(chatId);
-    }
-    permissionHandler.clearSessionRules();
-
-    await ctx.answerCallbackQuery({ text: "Resuming…" });
-    try {
-      await ctx.editMessageText(`Resuming session: ${sessionId}`);
-    } catch { /* message might be too old */ }
-
-    getOrSpawnClaude(chatId, sessionId);
+    await ctx.answerCallbackQuery({ text: "Buttons removed — use /resume <id>" }).catch(() => {});
     return;
   }
 
@@ -642,7 +733,8 @@ async function main() {
   await bot.api.setMyCommands([
     { command: "start", description: "Welcome & setup info" },
     { command: "new", description: "Fresh session" },
-    { command: "resume", description: "Resume previous session" },
+    { command: "list", description: "List recent sessions" },
+    { command: "resume", description: "Resume a session by ID" },
     { command: "id", description: "Show chat ID" },
   ]);
 

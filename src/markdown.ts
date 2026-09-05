@@ -142,7 +142,7 @@ function protectTables(text: string, protect: (html: string) => string): string 
   return out.join("\n");
 }
 
-function escapeHtml(s: string): string {
+export function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")

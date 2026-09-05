@@ -69,6 +69,8 @@ Telegram ←→ Grammy Bot (index.ts)
 
 - `/start` — Show chat ID
 - `/new` — Kill current Claude process and start fresh
+- `/list` — List recent sessions (title + full session ID, newest first). Titles come from the session JSONL's `ai-title`/`summary` line, falling back to the first user message.
+- `/resume <id>` — Resume a session by ID (full ID or any unique prefix). No inline buttons — text input only.
 - `/id` — Show chat ID
 - Commands are registered via `bot.api.setMyCommands()` on startup to keep the Telegram menu in sync
 
