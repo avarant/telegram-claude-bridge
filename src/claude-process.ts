@@ -51,6 +51,8 @@ export class ClaudeProcess extends EventEmitter {
       "--output-format",
       "stream-json",
       "--verbose",
+      "--model",
+      process.env.BRIDGE_MODEL || "claude-opus-5",
       "--settings",
       JSON.stringify(settings),
     ];
