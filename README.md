@@ -57,6 +57,7 @@ npm start
 |----------|------------------------------------------------|
 | `/start` | Show chat ID and setup instructions            |
 | `/new`   | Kill the current Claude session and start fresh |
+| `/stop`  | Interrupt the in-flight turn, keeping the session |
 | `/id`    | Show your chat ID                              |
 
 ## Architecture

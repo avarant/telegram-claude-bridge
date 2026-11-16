@@ -69,6 +69,7 @@ Telegram ←→ Grammy Bot (index.ts)
 
 - `/start` — Show chat ID
 - `/new` — Kill current Claude process and start fresh
+- `/stop` — Interrupt the turn Claude is working on, without killing the session. Sends the stream-json control request `{"type":"control_request","request_id":"<uuid>","request":{"subtype":"interrupt"}}` on the subprocess's stdin; the turn ends with a `result` event of subtype `error_during_execution` and the process stays alive, so the next message continues the same session. Also denies any outstanding permission prompts (`PermissionHandler.denyAllPending()`), otherwise a tool call blocked on the hook would hold the turn open until the 120s hook timeout. The handler deliberately does not take the per-chat lock (that lock is held for the whole interaction) and reports partial output followed by "Stopped."
 - `/list` — List recent sessions (title + full session ID, newest first). Titles come from the session JSONL's `ai-title`/`summary` line, falling back to the first user message.
 - `/resume <id>` — Resume a session by ID (full ID or any unique prefix). No inline buttons — text input only.
 - `/id` — Show chat ID
