@@ -15,6 +15,10 @@ export class ClaudeProcess extends EventEmitter {
   private buffer = "";
   private _ready = false;
   private sessionId: string | null = null;
+  // True between sending a user message and receiving that turn's result event.
+  private turnActive = false;
+  // True if an interrupt was requested for the current/just-finished turn.
+  private interruptRequested = false;
 
   get isRunning(): boolean {
     return this.proc !== null && !this.proc.killed;
@@ -22,6 +26,16 @@ export class ClaudeProcess extends EventEmitter {
 
   getSessionId(): string | null {
     return this.sessionId;
+  }
+
+  /** Whether Claude is currently working on a turn. */
+  get isBusy(): boolean {
+    return this.turnActive;
+  }
+
+  /** Whether the current/last turn was interrupted via interrupt(). */
+  get wasInterrupted(): boolean {
+    return this.interruptRequested;
   }
 
   spawn(resumeSessionId?: string): void {
@@ -89,6 +103,7 @@ export class ClaudeProcess extends EventEmitter {
       this.proc = null;
       this._ready = false;
       this.sessionId = null;
+      this.turnActive = false;
       this.emit("exit", code);
     });
 
@@ -97,6 +112,7 @@ export class ClaudeProcess extends EventEmitter {
       this.proc = null;
       this._ready = false;
       this.sessionId = null;
+      this.turnActive = false;
       this.emit("error", err);
     });
 
@@ -118,6 +134,7 @@ export class ClaudeProcess extends EventEmitter {
           this.sessionId = event.session_id as string;
           console.log("[claude] session_id:", this.sessionId);
         }
+        if (event.type === "result") this.turnActive = false;
         console.log("[claude] event:", event.type, JSON.stringify(event).slice(0, 200));
         this.emit("event", event);
       } catch {
@@ -157,7 +174,30 @@ export class ClaudeProcess extends EventEmitter {
       parent_tool_use_id: null,
     });
     this.proc.stdin.write(msg + "\n");
+    this.turnActive = true;
+    this.interruptRequested = false;
     console.log("[claude] sent user message", images ? `(with ${images.length} image(s))` : "");
+  }
+
+  /**
+   * Ask Claude to abort the in-flight turn, leaving the process (and session)
+   * alive. Sends the stream-json `interrupt` control request, which ends the
+   * turn with a `result` event of subtype `error_during_execution`.
+   * Returns false if there is nothing to interrupt.
+   */
+  interrupt(): boolean {
+    if (!this.proc || !this.proc.stdin || this.proc.killed || !this.turnActive) {
+      return false;
+    }
+    const msg = JSON.stringify({
+      type: "control_request",
+      request_id: randomUUID(),
+      request: { subtype: "interrupt" },
+    });
+    this.proc.stdin.write(msg + "\n");
+    this.interruptRequested = true;
+    console.log("[claude] sent interrupt control request");
+    return true;
   }
 
   kill(): void {
@@ -166,6 +206,8 @@ export class ClaudeProcess extends EventEmitter {
       this.proc = null;
       this._ready = false;
       this.sessionId = null;
+      this.turnActive = false;
+      this.interruptRequested = false;
       console.log("[claude] process killed");
     }
   }

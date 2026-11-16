@@ -621,6 +621,26 @@ export class PermissionHandler {
     });
   }
 
+  /**
+   * Deny every outstanding permission prompt and drop any in-flight
+   * AskUserQuestion UI state. Used by /stop so a tool call that is blocked
+   * waiting on the hook doesn't keep the turn alive for the full timeout.
+   * Returns how many prompts were denied.
+   */
+  denyAllPending(): number {
+    let count = 0;
+    for (const [id, pending] of [...this.pending]) {
+      clearTimeout(pending.timer);
+      this.pending.delete(id);
+      pending.resolve({ allow: false, systemMessage: "Stopped by user" });
+      count++;
+    }
+    this.askSessions.clear();
+    this.askByChat.clear();
+    if (count > 0) console.log(`[permission] denied ${count} pending request(s) (stop)`);
+    return count;
+  }
+
   resolvePermission(id: string, decision: PermissionDecision): boolean {
     const pending = this.pending.get(id);
     if (!pending) return false;

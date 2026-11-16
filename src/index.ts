@@ -106,8 +106,9 @@ function streamClaude(
         } else if (event.type === "result") {
           finished = true;
           const result = event as Record<string, unknown>;
-          // If no text was streamed, yield the result text
-          if (result.is_error === true) {
+          // If no text was streamed, yield the result text. A deliberate
+          // interrupt also reports is_error, so don't surface it as a failure.
+          if (result.is_error === true && !claude.wasInterrupted) {
             const errText = (result.error as string) || (result.result as string) || "An error occurred.";
             if (resolveNext) {
               const r = resolveNext;
@@ -233,6 +234,30 @@ bot.command("new", async (ctx) => {
   }
   permissionHandler.clearSessionRules();
   await ctx.reply("Session cleared. Send a message to start a new one.");
+});
+
+// Interrupt the in-flight turn without touching the session. Must not take the
+// per-chat lock (handleClaudeInteraction holds it while Claude works).
+bot.command("stop", async (ctx) => {
+  if (!isAllowed(ctx.chat.id)) return;
+
+  const chatId = String(ctx.chat.id);
+  const cp = claudeProcesses.get(chatId);
+  // Unblock any tool call sitting on a permission prompt first, so the
+  // interrupt doesn't race a hook that is still waiting on a button tap.
+  const denied = permissionHandler.denyAllPending();
+  const interrupted = cp?.isRunning ? cp.interrupt() : false;
+
+  if (interrupted) {
+    // handleClaudeInteraction reports "Stopped." once the result arrives.
+    console.log(`[bot] /stop interrupted turn for chat ${chatId}`);
+    return;
+  }
+  if (denied > 0) {
+    await ctx.reply(`Denied ${denied} pending tool request${denied === 1 ? "" : "s"}.`);
+    return;
+  }
+  await ctx.reply("Nothing to stop — Claude is idle.");
 });
 
 const SESSIONS_DIR = `${process.env.HOME || "/home/varant"}/.claude/projects/-home-varant`;
@@ -465,7 +490,11 @@ async function handleClaudeInteraction(
         clearInterval(typing);
       }
 
-      if (fullText.trim()) {
+      if (claude.wasInterrupted) {
+        // /stop: deliver whatever Claude had produced, then say so.
+        if (fullText.trim()) await deliverMarkdown(numChatId, fullText);
+        await bot.api.sendMessage(numChatId, "Stopped.").catch(() => {});
+      } else if (fullText.trim()) {
         await deliverMarkdown(numChatId, fullText);
       } else {
         await bot.api.sendMessage(numChatId, "(No response from Claude)");
@@ -733,6 +762,7 @@ async function main() {
   await bot.api.setMyCommands([
     { command: "start", description: "Welcome & setup info" },
     { command: "new", description: "Fresh session" },
+    { command: "stop", description: "Interrupt what Claude is doing" },
     { command: "list", description: "List recent sessions" },
     { command: "resume", description: "Resume a session by ID" },
     { command: "id", description: "Show chat ID" },
