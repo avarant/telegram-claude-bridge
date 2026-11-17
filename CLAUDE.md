@@ -16,7 +16,7 @@ npm start
 Telegram ←→ Grammy Bot (index.ts)
                 ↕
          Claude subprocess (claude-process.ts)
-            spawned with: claude -p --input-format stream-json --output-format stream-json --verbose --settings claude-settings.json
+            spawned with: claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --settings claude-settings.json
                 ↕
          PreToolUse hooks → permission-hook.sh → HTTP POST to IPC server
                 ↕
@@ -25,7 +25,8 @@ Telegram ←→ Grammy Bot (index.ts)
 
 ### Source Files
 
-- `src/index.ts` — Main entry: Grammy bot, message handling, streaming via `@grammyjs/stream`, permission button callbacks
+- `src/index.ts` — Main entry: Grammy bot, message handling, final rich-message delivery, permission button callbacks
+- `src/turn-stream.ts` — Streams one turn into a live rich draft (`sendRichMessageDraft`): token text, tool status line, heartbeat, stop button; plus `splitMarkdown` for the final send
 - `src/claude-process.ts` — Claude Code subprocess lifecycle, stream-json message protocol
 - `src/permission-handler.ts` — HTTP IPC server on localhost:19275 for permission request/response flow
 - `src/permission-hook.sh` — Shell script called by Claude's PreToolUse hook, forwards to IPC server
@@ -36,7 +37,9 @@ Telegram ←→ Grammy Bot (index.ts)
 
 - **Stream-JSON input format**: Messages sent as `{"type":"user","session_id":"...","message":{"role":"user","content":"text"},"parent_tool_use_id":null}`
 - **Hooks**: Uses `PreToolUse` (not `PermissionRequest`) — only PreToolUse fires in `-p` headless mode
-- **Streaming**: Uses `@grammyjs/stream` plugin with `sendMessageDraft` API for real-time animated responses
+- **Streaming**: `--include-partial-messages` gives token-level `stream_event` deltas. `turn-stream.ts` pushes them into a `sendRichMessageDraft` draft (native Markdown, throttled to ~2/s, one `draft_id` per turn). While a tool runs, the draft ends with a `<tg-thinking>` status line ("Reading index.ts", "Show working tree status"…). Drafts expire after ~30s, so it is re-sent every 15s as a heartbeat. Subagent events (`parent_tool_use_id` set) are ignored. If a rich draft is rejected the turn falls back to plain `sendMessageDraft`.
+- **Final delivery**: when the `result` arrives the reply is sent with `sendRichMessage` (Markdown, 32k-char limit; `splitMarkdown` splits longer replies and re-opens code fences). A chunk Telegram rejects falls back to the old `markdown.ts` HTML path.
+- **Stop button**: drafts are sent with `can_stop`/`keep_on_stop`. Tapping it delivers a `stopped_message_generation` update; if that chat's Claude is busy the bot runs `stopChat()`. This is the only way to interrupt (the `/stop` command was removed). `stopChat()` first denies outstanding permission prompts (`PermissionHandler.denyAllPending()`), otherwise a tool call blocked on the hook would hold the turn open until the 120s hook timeout. It then sends the stream-json control request `{"type":"control_request","request_id":"<uuid>","request":{"subtype":"interrupt"}}`; the turn ends with a `result` of subtype `error_during_execution`, the process stays alive, and the bridge sends the partial reply followed by "Stopped." It must not take the per-chat lock (the turn holds it).
 - **Concurrency**: Message handler runs Claude interaction in background (not awaited) so Grammy can process permission button callbacks concurrently. Per-chat lock serializes messages.
 - **Env filtering**: All `CLAUDE*` env vars (except `CLAUDE_API_KEY`) are stripped from subprocess to avoid "nested session" error
 
@@ -69,7 +72,6 @@ Telegram ←→ Grammy Bot (index.ts)
 
 - `/start` — Show chat ID
 - `/new` — Kill current Claude process and start fresh
-- `/stop` — Interrupt the turn Claude is working on, without killing the session. Sends the stream-json control request `{"type":"control_request","request_id":"<uuid>","request":{"subtype":"interrupt"}}` on the subprocess's stdin; the turn ends with a `result` event of subtype `error_during_execution` and the process stays alive, so the next message continues the same session. Also denies any outstanding permission prompts (`PermissionHandler.denyAllPending()`), otherwise a tool call blocked on the hook would hold the turn open until the 120s hook timeout. The handler deliberately does not take the per-chat lock (that lock is held for the whole interaction) and reports partial output followed by "Stopped."
 - `/list` — List recent sessions (title + full session ID, newest first). Titles come from the session JSONL's `ai-title`/`summary` line, falling back to the first user message.
 - `/resume <id>` — Resume a session by ID (full ID or any unique prefix). No inline buttons — text input only.
 - `/id` — Show chat ID

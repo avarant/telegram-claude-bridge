@@ -2,12 +2,12 @@ import "dotenv/config";
 import { writeFile } from "node:fs/promises";
 import { Bot, InlineKeyboard, InputFile, type Context } from "grammy";
 import { autoRetry } from "@grammyjs/auto-retry";
-import { stream, type StreamFlavor } from "@grammyjs/stream";
 import { ClaudeProcess } from "./claude-process.js";
 import { PermissionHandler, PermissionRequest, PermissionDecision } from "./permission-handler.js";
 import { markdownToTelegramHtml, escapeHtml } from "./markdown.js";
+import { streamTurn, splitMarkdown } from "./turn-stream.js";
 
-type MyContext = StreamFlavor<Context>;
+type MyContext = Context;
 
 // --- Config ---
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN!;
@@ -38,7 +38,6 @@ function withChatLock(chatId: string, fn: () => Promise<void>): Promise<void> {
 // --- Bot ---
 const bot = new Bot<MyContext>(BOT_TOKEN);
 bot.api.config.use(autoRetry());
-bot.use(stream());
 
 function isAllowed(chatId: number): boolean {
   if (ALLOWED_CHAT_IDS.size === 0) return false;
@@ -70,100 +69,6 @@ function getOrSpawnClaude(chatId: string, resumeSessionId?: string): ClaudeProce
 
   cp.spawn(resumeSessionId);
   return cp;
-}
-
-/**
- * Create an async iterator that yields text chunks from Claude events,
- * resolving when the result event is received.
- */
-function streamClaude(
-  claude: ClaudeProcess
-): AsyncIterable<string> {
-  return {
-    [Symbol.asyncIterator]() {
-      let finished = false;
-      let resolveNext: ((value: IteratorResult<string>) => void) | null = null;
-      const pending: string[] = [];
-
-      const onEvent = (event: Record<string, unknown>) => {
-        if (event.type === "assistant") {
-          const msg = event.message as {
-            content?: Array<{ type: string; text?: string }>;
-          } | undefined;
-          if (msg?.content) {
-            for (const block of msg.content) {
-              if (block.type === "text" && block.text) {
-                if (resolveNext) {
-                  const r = resolveNext;
-                  resolveNext = null;
-                  r({ value: block.text, done: false });
-                } else {
-                  pending.push(block.text);
-                }
-              }
-            }
-          }
-        } else if (event.type === "result") {
-          finished = true;
-          const result = event as Record<string, unknown>;
-          // If no text was streamed, yield the result text. A deliberate
-          // interrupt also reports is_error, so don't surface it as a failure.
-          if (result.is_error === true && !claude.wasInterrupted) {
-            const errText = (result.error as string) || (result.result as string) || "An error occurred.";
-            if (resolveNext) {
-              const r = resolveNext;
-              resolveNext = null;
-              r({ value: errText, done: false });
-            } else {
-              pending.push(errText);
-            }
-          }
-          // Signal completion on next pull
-          if (resolveNext) {
-            const r = resolveNext;
-            resolveNext = null;
-            r({ value: undefined as unknown as string, done: true });
-          }
-        }
-      };
-
-      const onExit = () => {
-        finished = true;
-        if (resolveNext) {
-          const r = resolveNext;
-          resolveNext = null;
-          if (pending.length === 0) {
-            r({ value: undefined as unknown as string, done: true });
-          }
-        }
-      };
-
-      claude.on("event", onEvent);
-      claude.once("exit", onExit);
-
-      return {
-        next(): Promise<IteratorResult<string>> {
-          // Drain pending chunks first
-          if (pending.length > 0) {
-            return Promise.resolve({ value: pending.shift()!, done: false });
-          }
-          if (finished) {
-            claude.removeListener("event", onEvent);
-            claude.removeListener("exit", onExit);
-            return Promise.resolve({ value: undefined as unknown as string, done: true });
-          }
-          return new Promise((resolve) => {
-            resolveNext = resolve;
-          });
-        },
-        return(): Promise<IteratorResult<string>> {
-          claude.removeListener("event", onEvent);
-          claude.removeListener("exit", onExit);
-          return Promise.resolve({ value: undefined as unknown as string, done: true });
-        },
-      };
-    },
-  };
 }
 
 // --- Permission Handler ---
@@ -210,6 +115,14 @@ const permissionHandler = new PermissionHandler(
   }
 );
 
+// Log every incoming update (type + short text) so dropped commands are visible.
+bot.use(async (ctx, next) => {
+  const kind = Object.keys(ctx.update).filter((k) => k !== "update_id").join(",");
+  const txt = ctx.message?.text ?? ctx.callbackQuery?.data ?? "";
+  console.log(`[bot] update ${ctx.update.update_id}: ${kind}${txt ? ` "${txt.slice(0, 60)}"` : ""}`);
+  await next();
+});
+
 // --- Bot Commands ---
 bot.command("start", async (ctx) => {
   await ctx.reply(
@@ -236,28 +149,29 @@ bot.command("new", async (ctx) => {
   await ctx.reply("Session cleared. Send a message to start a new one.");
 });
 
-// Interrupt the in-flight turn without touching the session. Must not take the
-// per-chat lock (handleClaudeInteraction holds it while Claude works).
-bot.command("stop", async (ctx) => {
-  if (!isAllowed(ctx.chat.id)) return;
-
-  const chatId = String(ctx.chat.id);
+// Interrupt the in-flight turn without touching the session (draft stop button).
+// Must not take the per-chat lock (handleClaudeInteraction holds it while Claude works).
+function stopChat(chatId: string): { interrupted: boolean; denied: number } {
   const cp = claudeProcesses.get(chatId);
   // Unblock any tool call sitting on a permission prompt first, so the
   // interrupt doesn't race a hook that is still waiting on a button tap.
   const denied = permissionHandler.denyAllPending();
   const interrupted = cp?.isRunning ? cp.interrupt() : false;
+  // handleClaudeInteraction reports "Stopped." once the result arrives.
+  if (interrupted) console.log(`[bot] interrupted turn for chat ${chatId}`);
+  return { interrupted, denied };
+}
 
-  if (interrupted) {
-    // handleClaudeInteraction reports "Stopped." once the result arrives.
-    console.log(`[bot] /stop interrupted turn for chat ${chatId}`);
-    return;
-  }
-  if (denied > 0) {
-    await ctx.reply(`Denied ${denied} pending tool request${denied === 1 ? "" : "s"}.`);
-    return;
-  }
-  await ctx.reply("Nothing to stop — Claude is idle.");
+// The stop button Telegram shows on a streaming draft (can_stop). Stops whatever
+// turn is running in that chat; a stale press after the turn ended is a no-op.
+bot.on("stopped_message_generation", async (ctx) => {
+  const upd = ctx.update.stopped_message_generation!;
+  console.log("[bot] stop button pressed:", JSON.stringify(upd));
+  const chatId = Number(upd.chat?.id);
+  if (!isAllowed(chatId)) return;
+  if (!claudeProcesses.get(String(chatId))?.isBusy) return;
+  const { interrupted, denied } = stopChat(String(chatId));
+  console.log(`[bot] stop button: interrupted=${interrupted} denied=${denied}`);
 });
 
 const SESSIONS_DIR = `${process.env.HOME || "/home/varant"}/.claude/projects/-home-varant`;
@@ -457,6 +371,20 @@ async function deliverMarkdown(chatId: number, plain: string): Promise<void> {
   }
 }
 
+// Deliver the final answer as rich message(s) (native markdown: tables, code
+// blocks, collapsible sections; up to 32k chars each). Any chunk Telegram
+// rejects falls back to the legacy HTML renderer. Never throws.
+async function deliverRich(chatId: number, md: string): Promise<void> {
+  for (const chunk of splitMarkdown(md)) {
+    try {
+      await bot.api.sendRichMessage(chatId, { markdown: chunk });
+    } catch (err) {
+      console.error("[bot] rich send failed, falling back to HTML:", (err as Error).message);
+      await deliverMarkdown(chatId, chunk);
+    }
+  }
+}
+
 // --- Helper: send message to Claude and stream response ---
 async function handleClaudeInteraction(
   chatId: string,
@@ -471,31 +399,19 @@ async function handleClaudeInteraction(
       const claude = getOrSpawnClaude(chatId);
       claude.sendMessage(text, images);
 
-      // Show a "typing…" indicator while Claude works (it auto-expires after
-      // ~5s, so refresh it) — this is the only live feedback; the answer is
-      // sent once, when complete.
-      await bot.api.sendChatAction(numChatId, "typing").catch(() => {});
-      const typing = setInterval(() => {
-        bot.api.sendChatAction(numChatId, "typing").catch(() => {});
-      }, 5000);
-
-      // Wait for the complete response, then send it once as formatted HTML
-      // (chunked across multiple messages only if it exceeds Telegram's limit).
-      let fullText = "";
-      try {
-        for await (const chunk of streamClaude(claude)) {
-          fullText += chunk;
-        }
-      } finally {
-        clearInterval(typing);
-      }
+      // Stream the reply into a live rich draft (text as it is generated,
+      // plus a status line while tools run), then send it for real.
+      const { done } = streamTurn(bot.api, numChatId, claude);
+      const result = await done;
+      let reply = result.text.trim();
+      if (result.error) reply = reply ? `${reply}\n\n${result.error}` : result.error;
 
       if (claude.wasInterrupted) {
-        // /stop: deliver whatever Claude had produced, then say so.
-        if (fullText.trim()) await deliverMarkdown(numChatId, fullText);
+        // Stop button: keep whatever Claude had produced, then say so.
+        if (reply) await deliverRich(numChatId, reply);
         await bot.api.sendMessage(numChatId, "Stopped.").catch(() => {});
-      } else if (fullText.trim()) {
-        await deliverMarkdown(numChatId, fullText);
+      } else if (reply) {
+        await deliverRich(numChatId, reply);
       } else {
         await bot.api.sendMessage(numChatId, "(No response from Claude)");
       }
@@ -762,7 +678,6 @@ async function main() {
   await bot.api.setMyCommands([
     { command: "start", description: "Welcome & setup info" },
     { command: "new", description: "Fresh session" },
-    { command: "stop", description: "Interrupt what Claude is doing" },
     { command: "list", description: "List recent sessions" },
     { command: "resume", description: "Resume a session by ID" },
     { command: "id", description: "Show chat ID" },

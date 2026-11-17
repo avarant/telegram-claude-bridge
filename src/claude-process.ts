@@ -65,6 +65,8 @@ export class ClaudeProcess extends EventEmitter {
       "--output-format",
       "stream-json",
       "--verbose",
+      // Token-level stream_event deltas, so replies stream into Telegram drafts.
+      "--include-partial-messages",
       "--model",
       process.env.BRIDGE_MODEL || "claude-opus-5",
       "--settings",
@@ -135,7 +137,9 @@ export class ClaudeProcess extends EventEmitter {
           console.log("[claude] session_id:", this.sessionId);
         }
         if (event.type === "result") this.turnActive = false;
-        console.log("[claude] event:", event.type, JSON.stringify(event).slice(0, 200));
+        if (event.type !== "stream_event") {
+          console.log("[claude] event:", event.type, JSON.stringify(event).slice(0, 200));
+        }
         this.emit("event", event);
       } catch {
         console.error("[claude] non-JSON line:", trimmed.slice(0, 200));

@@ -623,7 +623,7 @@ export class PermissionHandler {
 
   /**
    * Deny every outstanding permission prompt and drop any in-flight
-   * AskUserQuestion UI state. Used by /stop so a tool call that is blocked
+   * AskUserQuestion UI state. Used by the draft stop button so a tool call that is blocked
    * waiting on the hook doesn't keep the turn alive for the full timeout.
    * Returns how many prompts were denied.
    */
