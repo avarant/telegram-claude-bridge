@@ -2,7 +2,7 @@
 
 A Telegram bot that bridges messages to a persistent [Claude Code](https://docs.anthropic.com/en/docs/claude-code) subprocess and streams responses back in real time.
 
-Responses are streamed live using Telegram's `sendMessageDraft` API and rendered with full markdown formatting (bold, italic, code blocks, links, etc.).
+Responses stream live, token by token, into a Telegram rich-message draft (`sendRichMessageDraft`) that shows what Claude is doing while tools run and has a stop button, then land as a native rich message (tables, code blocks, headings, collapsible sections).
 
 ## Features
 
@@ -57,7 +57,6 @@ npm start
 |----------|------------------------------------------------|
 | `/start` | Show chat ID and setup instructions            |
 | `/new`   | Kill the current Claude session and start fresh |
-| `/stop`  | Interrupt the in-flight turn, keeping the session |
 | `/id`    | Show your chat ID                              |
 
 ## Architecture
